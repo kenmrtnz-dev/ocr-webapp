@@ -156,3 +156,13 @@ def get_parsed_rows(job_id: str, page: str):
         data = json.load(f)
     return data.get(page, [])
 
+@app.get("/jobs/{job_id}/rows/{page}/bounds")
+def get_row_bounds(job_id: str, page: str):
+    path = os.path.join(DATA_DIR, "jobs", job_id, "result", "bounds.json")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Row bounds not ready")
+    with open(path) as f:
+        data = json.load(f)
+    return data.get(page, [])
+
+

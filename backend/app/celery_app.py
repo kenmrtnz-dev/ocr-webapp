@@ -110,8 +110,23 @@ def process_pdf(job_id: str):
 
         parsed_output[page] = parsed_rows
 
-    with open(os.path.join(job_dir, "result", "parsed_rows.json"), "w") as f:
+    result_dir = os.path.join(job_dir, "result")
+    os.makedirs(result_dir, exist_ok=True)
+    with open(os.path.join(result_dir, "parsed_rows.json"), "w") as f:
         json.dump(parsed_output, f, indent=2)
+    
+    # in process_pdf (celery_app.py)
+    bounds_output = {}
+    for page_name in pages:
+        row_bounds = detect_rows(page_path)
+        bounds_output[page_name] = [
+            {"row_id": i+1, "y1": y1, "y2": y2} for i, (y1, y2) in enumerate(row_bounds)
+        ]
+        crop_rows(page_path, row_bounds, page_rows_dir)
+    os.makedirs(os.path.join(job_dir, "result"), exist_ok=True)
+    with open(os.path.join(job_dir, "result", "bounds.json"), "w") as f:
+        json.dump(bounds_output, f)
+
 
     # ===============================
     # STEP 3: FINISH JOB
