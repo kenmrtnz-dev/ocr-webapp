@@ -117,15 +117,22 @@ def process_pdf(job_id: str):
     
     # in process_pdf (celery_app.py)
     bounds_output = {}
-    for page_name in pages:
+    for i, page in enumerate(pages, start=1):
+        page_name = f"page_{i:03}"
+        page_path = os.path.join(cleaned_dir, f"{page_name}.png")
         row_bounds = detect_rows(page_path)
+        # create a list of dicts with row_id and coordinates
         bounds_output[page_name] = [
-            {"row_id": i+1, "y1": y1, "y2": y2} for i, (y1, y2) in enumerate(row_bounds)
+            {"row_id": idx + 1, "y1": y1, "y2": y2} 
+            for idx, (y1, y2) in enumerate(row_bounds)
         ]
-        crop_rows(page_path, row_bounds, page_rows_dir)
-    os.makedirs(os.path.join(job_dir, "result"), exist_ok=True)
-    with open(os.path.join(job_dir, "result", "bounds.json"), "w") as f:
-        json.dump(bounds_output, f)
+        crop_rows(page_path, row_bounds, os.path.join(rows_base, page_name))
+
+
+    result_dir = os.path.join(job_dir, "result")
+    os.makedirs(result_dir, exist_ok=True)
+    with open(os.path.join(result_dir, "bounds.json"), "w") as f:
+        json.dump(bounds_output, f, indent=2)
 
 
     # ===============================
