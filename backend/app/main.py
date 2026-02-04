@@ -121,18 +121,20 @@ def get_ocr(job_id: str, page: str):
     with open(path) as f:
         return json.load(f)
     
-@app.get("/jobs/{job_id}/rows/{page}")
-def list_rows(job_id: str, page: str):
-    path = os.path.join(DATA_DIR, "jobs", job_id, "rows", page)
-    if not os.path.exists(path):
-        return {"rows": []}
-    return {"rows": sorted(os.listdir(path))}
-
 
 @app.get("/jobs/{job_id}/rows/{page}/{row}")
 def get_row_image(job_id: str, page: str, row: str):
     path = os.path.join(DATA_DIR, "jobs", job_id, "rows", page, row)
     return FileResponse(path, media_type="image/png")
+
+@app.get("/jobs/{job_id}/rows/{page}/bounds")
+def get_row_bounds(job_id: str, page: str):
+    path = os.path.join(DATA_DIR, "jobs", job_id, "result", "bounds.json")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Row bounds not ready")
+    with open(path) as f:
+        data = json.load(f)
+    return data.get(page, [])
 
 
 @app.get("/jobs/{job_id}/ocr/rows")
@@ -149,20 +151,6 @@ def list_rows(job_id: str, page: str):
     return {"rows": sorted(os.listdir(path))}
 
 
-@app.get("/jobs/{job_id}/parsed/{page}")
-def get_parsed_rows(job_id: str, page: str):
-    path = os.path.join(DATA_DIR, "jobs", job_id, "result", "parsed_rows.json")
-    with open(path) as f:
-        data = json.load(f)
-    return data.get(page, [])
 
-@app.get("/jobs/{job_id}/rows/{page}/bounds")
-def get_row_bounds(job_id: str, page: str):
-    path = os.path.join(DATA_DIR, "jobs", job_id, "result", "bounds.json")
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Row bounds not ready")
-    with open(path) as f:
-        data = json.load(f)
-    return data.get(page, [])
 
 
