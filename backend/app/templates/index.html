@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>OCR Passbook / SOA Upload</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      background: #f5f6f8;
+      padding: 40px;
+    }
+    .box {
+      background: white;
+      padding: 24px;
+      max-width: 480px;
+      margin: auto;
+      border-radius: 8px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.08);
+    }
+    input[type=file] {
+      margin: 16px 0;
+    }
+    button {
+      padding: 10px 16px;
+      cursor: pointer;
+    }
+    .status {
+      margin-top: 16px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="box">
+  <h2>Upload Passbook / SOA</h2>
+
+  <input type="file" id="file" accept="application/pdf" />
+  <br />
+  <button type="button" onclick="upload()">Upload</button>
+
+  <div class="status" id="status"></div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
