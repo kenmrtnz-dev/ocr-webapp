@@ -68,83 +68,61 @@ def process_pdf(job_id: str):
     os.makedirs(ocr_dir, exist_ok=True)
 
     update_status(job_dir, "processing", step="row_detection")
-
+    # Dictionaries to collect results
     row_ocr_output = {}
+    row_bounds_output = {}
 
+    # Loop over each cleaned page
     for page_file in sorted(os.listdir(cleaned_dir)):
         page_name = page_file.replace(".png", "")
         page_path = os.path.join(cleaned_dir, page_file)
-
         page_rows_dir = os.path.join(rows_base, page_name)
 
-        # 1️⃣ detect row boundaries
+        # Detect row boundaries
         bounds = detect_rows(page_path)
+        row_bounds_output[page_name] = [
+            {"row_id": idx + 1, "y1": y1, "y2": y2}
+            for idx, (y1, y2) in enumerate(bounds)
+        ]
 
-        # 2️⃣ crop rows
+        # Crop rows
         crop_rows(page_path, bounds, page_rows_dir)
 
-    # 3️⃣ OCR each row
-    rows_text = []
-    for row_file in sorted(os.listdir(page_rows_dir)):
-        row_path = os.path.join(page_rows_dir, row_file)
-        text = ocr_row(row_path)
-        rows_text.append({
-            "row": row_file,
-            "text": text
-        })
+        # OCR each row
+        rows_text = []
+        for row_file in sorted(os.listdir(page_rows_dir)):
+            row_path = os.path.join(page_rows_dir, row_file)
+            text = ocr_row(row_path)
+            rows_text.append({"row": row_file, "text": text})
+        row_ocr_output[page_name] = rows_text
 
-    row_ocr_output[page_name] = rows_text
-
-    # Save row OCR
+    # Write row OCR to jobs/<job_id>/ocr/rows.json
     with open(os.path.join(ocr_dir, "rows.json"), "w") as f:
         json.dump(row_ocr_output, f, indent=2)
 
+    # Build parsed rows and write parsed_rows.json
     parsed_output = {}
-
     for page, rows in row_ocr_output.items():
         parsed_rows = []
         for r in rows:
             parsed = parse_row(r["text"])
             parsed["row_id"] = r["row"].replace("row_", "").replace(".png", "")
             parsed_rows.append(parsed)
-
         parsed_output[page] = parsed_rows
 
     result_dir = os.path.join(job_dir, "result")
     os.makedirs(result_dir, exist_ok=True)
     with open(os.path.join(result_dir, "parsed_rows.json"), "w") as f:
         json.dump(parsed_output, f, indent=2)
-    
-    # in process_pdf (celery_app.py)
-    bounds_output = {}
-    for page_file in sorted(os.listdir(cleaned_dir)):
-        page_name = page_file.replace(".png", "")
-        page_path = os.path.join(cleaned_dir, page_file)
-        row_bounds = detect_rows(page_path)
-        bounds_output[page_name] = [
-            {"row_id": idx + 1, "y1": y1, "y2": y2}
-            for idx, (y1, y2) in enumerate(row_bounds)
-        ]
-        crop_rows(page_path, row_bounds, os.path.join(rows_base, page_name))
-    result_dir = os.path.join(job_dir, "result")
-    os.makedirs(result_dir, exist_ok=True)
+
+    # Write bounds.json for the /bounds endpoint
     with open(os.path.join(result_dir, "bounds.json"), "w") as f:
-        json.dump(bounds_output, f, indent=2)
+        json.dump(row_bounds_output, f, indent=2)
 
-
-    # ===============================
-    # STEP 3: FINISH JOB
-    # ===============================
     update_status(job_dir, "done", pages=len(pages))
-
     print(f"[WORKER] Finished job {job_id}")
-
     return {"pages": len(pages)}
 
-
-# --------------------------------
-# ATOMIC STATUS UPDATE (CRITICAL)
-# --------------------------------
 def update_status(job_dir, status, **extra):
     tmp_path = os.path.join(job_dir, "status.tmp")
     final_path = os.path.join(job_dir, "status.json")
