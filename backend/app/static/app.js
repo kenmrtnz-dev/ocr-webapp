@@ -9,6 +9,7 @@ let pageList = [];
 
 let ocrItems = [];
 let highlightedId = null;
+let jobDone = false
 
 
 /* ================================
@@ -64,6 +65,7 @@ async function pollStatus() {
 
     await loadCleanedPages();
     polling = false;
+    jobDone = true
     return;
   }
 
@@ -118,13 +120,7 @@ async function showCurrentPage() {
       <div style="width:45%; overflow:auto">
         <h4>OCR Text</h4>
         <table border="1" width="100%" id="ocrTable">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Text</th>
-              <th>Conf</th>
-            </tr>
-          </thead>
+          <thead id="ocrHeader"></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -149,7 +145,9 @@ async function showCurrentPage() {
     </div>
   `;
 
-  await loadRowView(page.replace(".png", ""));
+  if (jobDone) {
+    await loadRowView(page.replace(".png", ""));
+  }
 
 }
 
@@ -244,6 +242,8 @@ let rowBounds = [];
 let activeRowId = null;
 
 async function loadRowView(pageName) {
+  setRowTableHeader();
+
   const [parsedRes, boundsRes] = await Promise.all([
     fetch(`/jobs/${currentJobId}/parsed/${pageName}`),
     fetch(`/jobs/${currentJobId}/rows/${pageName}/bounds`)
@@ -252,9 +252,15 @@ async function loadRowView(pageName) {
   parsedRows = await parsedRes.json();
   rowBounds = await boundsRes.json();
 
+  console.log("parsedRows:", parsedRows);
+  console.log("rowBounds:", rowBounds);
+
+
   renderRowTable();
   setTimeout(drawRowBoxes, 200);
 }
+
+
 
 
 function renderRowTable() {
@@ -317,3 +323,17 @@ function selectRow(rowId) {
 
   drawRowBoxes();
 }
+
+function setRowTableHeader() {
+  document.getElementById("ocrHeader").innerHTML = `
+    <tr>
+      <th>#</th>
+      <th>Date</th>
+      <th>Description</th>
+      <th>Debit</th>
+      <th>Credit</th>
+      <th>Balance</th>
+    </tr>
+  `;
+}
+

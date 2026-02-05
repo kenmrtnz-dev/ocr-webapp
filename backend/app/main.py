@@ -2,7 +2,6 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-
 import uuid, os, json
 from app.celery_app import process_pdf
 
@@ -122,11 +121,6 @@ def get_ocr(job_id: str, page: str):
         return json.load(f)
     
 
-@app.get("/jobs/{job_id}/rows/{page}/{row}")
-def get_row_image(job_id: str, page: str, row: str):
-    path = os.path.join(DATA_DIR, "jobs", job_id, "rows", page, row)
-    return FileResponse(path, media_type="image/png")
-
 @app.get("/jobs/{job_id}/rows/{page}/bounds")
 def get_row_bounds(job_id: str, page: str):
     path = os.path.join(DATA_DIR, "jobs", job_id, "result", "bounds.json")
@@ -135,6 +129,13 @@ def get_row_bounds(job_id: str, page: str):
     with open(path) as f:
         data = json.load(f)
     return data.get(page, [])
+
+@app.get("/jobs/{job_id}/rows/{page}/{row}")
+def get_row_image(job_id: str, page: str, row: str):
+    path = os.path.join(DATA_DIR, "jobs", job_id, "rows", page, row)
+    return FileResponse(path, media_type="image/png")
+
+
 
 
 @app.get("/jobs/{job_id}/ocr/rows")
@@ -149,6 +150,19 @@ def list_rows(job_id: str, page: str):
     if not os.path.exists(path):
         return {"rows": []}
     return {"rows": sorted(os.listdir(path))}
+
+@app.get("/jobs/{job_id}/parsed/{page}")
+def get_parsed_rows(job_id: str, page: str):
+    path = os.path.join(DATA_DIR, "jobs", job_id, "result", "parsed_rows.json")
+
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Parsed rows not ready")
+
+    with open(path) as f:
+        data = json.load(f)
+
+    return data.get(page, [])
+
 
 
 
