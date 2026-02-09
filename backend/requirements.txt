@@ -18,6 +18,8 @@ opencv-python-headless==4.10.0.84
 # OCR options (pick 1 to start; you can enable both later):
 pytesseract==0.3.13
 easyocr
+paddleocr==3.4.0
+paddlepaddle==3.2.2
 torch==2.1.2
 torchvision==0.16.2
 
@@ -27,4 +29,3 @@ torchvision==0.16.2
 # DB (optional for now)
 psycopg[binary]==3.2.1
 SQLAlchemy==2.0.34
-

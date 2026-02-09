@@ -6,6 +6,7 @@ ENV PYTHONUNBUFFERED=1
 # System deps for OCR
 RUN apt-get update && apt-get install -y \
     poppler-utils \
+    tesseract-ocr \
     libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*

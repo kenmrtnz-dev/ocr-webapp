@@ -1,5 +1,6 @@
 services:
   api:
+    platform: linux/amd64
     build:
       context: ./backend
     container_name: ocr_api
@@ -20,6 +21,7 @@ services:
       --proxy-headers
 
   worker:
+    platform: linux/amd64
     build:
       context: ./backend
     container_name: ocr_worker
@@ -32,9 +34,11 @@ services:
       - redis
       - db
     command: >
-      celery -A app.celery_app.celery worker
+      sh -c "celery -A app.celery_app.celery worker
       --loglevel=INFO
-      --concurrency=2
+      --pool=prefork
+      --concurrency=${CELERY_CONCURRENCY:-4}
+      --max-tasks-per-child=${CELERY_MAX_TASKS_PER_CHILD:-25}"
 
   redis:
     image: redis:7-alpine

@@ -1,47 +1,126 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>OCR Passbook / SOA Upload</title>
-  <style>
-    body {
-      font-family: system-ui, sans-serif;
-      background: #f5f6f8;
-      padding: 40px;
-    }
-    .box {
-      background: white;
-      padding: 24px;
-      max-width: 480px;
-      margin: auto;
-      border-radius: 8px;
-      box-shadow: 0 10px 30px rgba(0,0,0,.08);
-    }
-    input[type=file] {
-      margin: 16px 0;
-    }
-    button {
-      padding: 10px 16px;
-      cursor: pointer;
-    }
-    .status {
-      margin-top: 16px;
-      font-size: 14px;
-    }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bank Statement OCR Processing</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body>
+    <div class="container">
+        <header>
+            <h1>Bank Statement OCR Processing</h1>
+            <p class="subtitle">Upload your bank statement to extract and process the data.</p>
+        </header>
 
-<div class="box">
-  <h2>Upload Passbook / SOA</h2>
+        <main>
+            <div class="upload-section">
+                <div class="upload-area" id="uploadArea">
+                    <div class="upload-icon">
+                        <i class="fas fa-cloud-upload-alt"></i>
+                    </div>
+                    <div class="upload-text">
+                        <h3>Drag & drop your file here</h3>
+                        <p>or</p>
+                        <button class="browse-button" id="browseButton">Browse</button>
+                        <input type="file" id="fileInput" class="file-input" accept=".pdf,application/pdf">
+                    </div>
+                    <p class="formats-info">Accepted format: PDF</p>
+                </div>
+                
+                <div class="file-info" id="fileInfo">
+                    <i class="fas fa-file-alt"></i>
+                    <div class="file-details">
+                        <div class="file-name" id="fileName">No file selected</div>
+                        <div class="file-size" id="fileSize">-</div>
+                    </div>
+                    <button class="remove-btn" id="removeFile">&times;</button>
+                </div>
+            </div>
 
-  <input type="file" id="file" accept="application/pdf" />
-  <br />
-  <button type="button" onclick="upload()">Upload</button>
+            <div class="processing-section">
+                <h2>Processing Status</h2>
+                <div class="progress-status">
+                    <div class="progress-meta">
+                        <span id="progressLabel">Waiting for upload</span>
+                        <span id="progressPercent">0%</span>
+                    </div>
+                    <div class="progress-track" aria-hidden="true">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <p class="progress-step" id="progressStep">Queued</p>
+                    <p class="progress-elapsed" id="progressElapsed">Elapsed: 00:00</p>
+                    <p class="progress-model" id="progressModel">OCR Model: -</p>
+                </div>
+            </div>
 
-  <div class="status" id="status"></div>
-</div>
+            <div class="results-section">
+                <div class="summary-card">
+                    <h3>Summary</h3>
+                    <div class="summary-items">
+                        <div class="summary-item">
+                            <div class="summary-label">Total Transactions</div>
+                            <div class="summary-value" id="totalTransactions">45</div>
+                        </div>
+                        <div class="summary-item">
+                            <div class="summary-label">Average Daily Balance (ADB)</div>
+                            <div class="summary-value" id="endingBalance">₱0.00</div>
+                        </div>
+                    </div>
+                </div>
 
-<script src="/static/app.js"></script>
+                <div class="extracted-data">
+                    <div class="section-header">
+                        <h3>Extracted Data</h3>
+                        <button class="csv-button" id="downloadCSV">
+                            <i class="fas fa-download"></i> Download CSV
+                        </button>
+                    </div>
+                    <div class="comparison-layout">
+                        <div class="table-panel">
+                            <div class="transactions-table">
+                                <div class="table-header">
+                                    <div class="table-cell">#</div>
+                                    <div class="table-cell">Date</div>
+                                    <div class="table-cell">Debit</div>
+                                    <div class="table-cell">Credit</div>
+                                    <div class="table-cell">Balance</div>
+                                    <div class="table-cell">Actions</div>
+                                </div>
+                                <div class="table-body"></div>
+                            </div>
+                        </div>
+                        <div class="preview-panel">
+                            <div class="preview-toolbar">
+                                <button class="preview-nav" id="prevPageBtn">Prev</button>
+                                <span id="pageIndicator">Page 0 / 0</span>
+                                <button class="preview-nav" id="nextPageBtn">Next</button>
+                                <button class="preview-nav" id="flattenModeBtn">Flatten</button>
+                                <button class="preview-nav" id="applyFlattenBtn">Apply</button>
+                                <button class="preview-nav" id="resetFlattenBtn">Reset</button>
+                            </div>
+                            <div class="preview-canvas-wrap">
+                                <img id="previewImage" alt="Statement page preview">
+                                <canvas id="previewCanvas"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="action-buttons">
+                <button class="btn btn-secondary" id="viewDetails">
+                    <i class="fas fa-eye"></i> View Details
+                </button>
+                <button class="btn btn-primary" id="finishSave">
+                    <i class="fas fa-check-circle"></i> Start OCR
+                </button>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
 </body>
 </html>
