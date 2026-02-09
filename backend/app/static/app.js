@@ -16,6 +16,8 @@ const viewDetails = document.getElementById('viewDetails');
 const finishSave = document.getElementById('finishSave');
 const tableBody = document.querySelector('.table-body');
 const totalTransactions = document.getElementById('totalTransactions');
+const totalDebitTransactions = document.getElementById('totalDebitTransactions');
+const totalCreditTransactions = document.getElementById('totalCreditTransactions');
 const endingBalance = document.getElementById('endingBalance');
 const previewImage = document.getElementById('previewImage');
 const previewCanvas = document.getElementById('previewCanvas');
@@ -25,6 +27,9 @@ const flattenModeBtn = document.getElementById('flattenModeBtn');
 const applyFlattenBtn = document.getElementById('applyFlattenBtn');
 const resetFlattenBtn = document.getElementById('resetFlattenBtn');
 const pageIndicator = document.getElementById('pageIndicator');
+const pageSelect = document.getElementById('pageSelect');
+const previewWrap = document.querySelector('.preview-canvas-wrap');
+const previewMagnifier = document.getElementById('previewMagnifier');
 const resultsSection = document.querySelector('.results-section');
 
 let selectedFile = null;
@@ -46,6 +51,8 @@ let ocrStarted = false;
 let pageImageVersion = {};
 let elapsedStartMs = 0;
 let elapsedTimer = null;
+let previewOverlayDataUrl = '';
+const MAGNIFIER_ZOOM = 2.2;
 
 browseButton.addEventListener('click', (e) => {
   e.stopPropagation();
@@ -144,9 +151,19 @@ nextPageBtn.addEventListener('click', () => {
   renderCurrentPage();
 });
 
+if (pageSelect) {
+  pageSelect.addEventListener('change', () => {
+    const idx = Number.parseInt(pageSelect.value, 10);
+    if (!Number.isFinite(idx) || idx < 0 || idx >= pageList.length) return;
+    currentPageIndex = idx;
+    renderCurrentPage();
+  });
+}
+
 previewImage.addEventListener('load', () => {
   previewImage.style.display = 'block';
   drawBoundingBoxes();
+  hideMagnifier();
 });
 
 previewImage.addEventListener('error', () => {
@@ -156,6 +173,13 @@ previewImage.addEventListener('error', () => {
 window.addEventListener('resize', () => {
   if (pageList.length) {
     drawBoundingBoxes();
+  }
+  hideMagnifier();
+});
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.row-menu')) {
+    closeAllRowMenus();
   }
 });
 
@@ -173,6 +197,16 @@ previewCanvas.addEventListener('click', (e) => {
   updateFlattenButtons();
   drawBoundingBoxes();
 });
+
+if (previewWrap) {
+  previewWrap.addEventListener('mousemove', (e) => {
+    updateMagnifier(e);
+  });
+
+  previewWrap.addEventListener('mouseleave', () => {
+    hideMagnifier();
+  });
+}
 
 flattenModeBtn.addEventListener('click', () => {
   if (!pageList.length || flattenBusy) return;
@@ -472,6 +506,8 @@ function renderRows(rows) {
   if (!rows.length) {
     tableBody.innerHTML = '<div class="table-empty">No transactions extracted</div>';
     totalTransactions.textContent = '0';
+    totalDebitTransactions.textContent = '0';
+    totalCreditTransactions.textContent = '0';
     endingBalance.textContent = '-';
     return;
   }
@@ -490,14 +526,14 @@ function renderRows(rows) {
     el.appendChild(rowNoCell);
 
     el.appendChild(makeEditableCell(row, 'date'));
+    el.appendChild(makeEditableCell(row, 'description'));
     el.appendChild(makeEditableCell(row, 'debit', true));
     el.appendChild(makeEditableCell(row, 'credit', true));
     el.appendChild(makeEditableCell(row, 'balance', true));
 
     const actionsCell = document.createElement('div');
     actionsCell.className = 'table-cell table-actions';
-    actionsCell.appendChild(makeRowActionButton('+', 'insert', () => insertRowAfter(row.row_key)));
-    actionsCell.appendChild(makeRowActionButton('x', 'delete', () => deleteRowByKey(row.row_key)));
+    actionsCell.appendChild(makeRowActionsMenu(row.row_key));
     el.appendChild(actionsCell);
 
     el.addEventListener('click', () => {
@@ -536,6 +572,7 @@ function renderCurrentPage() {
     pageIndicator.textContent = 'Page 0 / 0';
     prevPageBtn.disabled = true;
     nextPageBtn.disabled = true;
+    syncPageSelect();
     setPreviewEmptyState();
     return;
   }
@@ -545,9 +582,11 @@ function renderCurrentPage() {
   pageIndicator.textContent = `Page ${currentPageIndex + 1} / ${pageList.length}`;
   prevPageBtn.disabled = currentPageIndex === 0;
   nextPageBtn.disabled = currentPageIndex >= pageList.length - 1;
+  syncPageSelect();
 
   const src = `/jobs/${currentJobId}/cleaned/${pageFile}?v=${pageImageVersion[pageKey] || 0}`;
   if (previewImage.dataset.src !== src) {
+    hideMagnifier();
     previewImage.style.display = 'none';
     previewImage.dataset.src = src;
     previewImage.src = src;
@@ -621,6 +660,8 @@ function drawBoundingBoxes() {
   if (flattenMode) {
     drawFlattenOverlay(ctx);
   }
+
+  previewOverlayDataUrl = previewCanvas.toDataURL('image/png');
 }
 
 function getRenderedImageRect(imgEl) {
@@ -655,19 +696,86 @@ function getRenderedImageRect(imgEl) {
     top: rect.top + offsetY,
     width: renderW,
     height: renderH,
+    right: rect.left + offsetX + renderW,
+    bottom: rect.top + offsetY + renderH,
   };
+}
+
+function syncPageSelect() {
+  if (!pageSelect) return;
+  const needsRebuild = pageSelect.options.length !== (pageList.length + 1);
+  if (needsRebuild) {
+    pageSelect.innerHTML = '<option value="">Page</option>';
+    pageList.forEach((_, idx) => {
+      const opt = document.createElement('option');
+      opt.value = String(idx);
+      opt.textContent = `Page ${idx + 1}`;
+      pageSelect.appendChild(opt);
+    });
+  }
+  pageSelect.disabled = pageList.length === 0;
+  pageSelect.value = pageList.length ? String(currentPageIndex) : '';
+}
+
+function hideMagnifier() {
+  if (!previewMagnifier) return;
+  previewMagnifier.style.display = 'none';
+}
+
+function updateMagnifier(event) {
+  if (!previewMagnifier || !previewWrap || !pageList.length || !previewImage.naturalWidth || flattenMode) {
+    hideMagnifier();
+    return;
+  }
+
+  const imageRect = getRenderedImageRect(previewImage);
+  const wrapRect = previewWrap.getBoundingClientRect();
+  const x = event.clientX;
+  const y = event.clientY;
+  const withinImage = x >= imageRect.left && x <= imageRect.right && y >= imageRect.top && y <= imageRect.bottom;
+  if (!withinImage) {
+    hideMagnifier();
+    return;
+  }
+
+  const lensW = previewMagnifier.offsetWidth || 160;
+  const lensH = previewMagnifier.offsetHeight || 110;
+  const localX = x - imageRect.left;
+  const localY = y - imageRect.top;
+  const bgX = -(localX * MAGNIFIER_ZOOM - lensW / 2);
+  const bgY = -(localY * MAGNIFIER_ZOOM - lensH / 2);
+
+  const pageSrc = previewImage.currentSrc || previewImage.src;
+  if (previewOverlayDataUrl) {
+    previewMagnifier.style.backgroundImage = `url("${previewOverlayDataUrl}"), url("${pageSrc}")`;
+  } else {
+    previewMagnifier.style.backgroundImage = `url("${pageSrc}")`;
+  }
+  previewMagnifier.style.backgroundSize = `${Math.round(imageRect.width * MAGNIFIER_ZOOM)}px ${Math.round(imageRect.height * MAGNIFIER_ZOOM)}px`;
+  previewMagnifier.style.backgroundPosition = `${Math.round(bgX)}px ${Math.round(bgY)}px`;
+
+  let lensLeft = x - wrapRect.left + 16;
+  let lensTop = y - wrapRect.top + 16;
+  lensLeft = Math.max(4, Math.min(lensLeft, wrapRect.width - lensW - 4));
+  lensTop = Math.max(4, Math.min(lensTop, wrapRect.height - lensH - 4));
+
+  previewMagnifier.style.left = `${Math.round(lensLeft)}px`;
+  previewMagnifier.style.top = `${Math.round(lensTop)}px`;
+  previewMagnifier.style.display = 'block';
 }
 
 function clearCanvas() {
   const ctx = previewCanvas.getContext('2d');
   if (!ctx) return;
   ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+  previewOverlayDataUrl = '';
 }
 
 function setPreviewEmptyState() {
   previewImage.removeAttribute('src');
   previewImage.removeAttribute('data-src');
   previewImage.style.display = 'none';
+  hideMagnifier();
   previewCanvas.style.left = '0px';
   previewCanvas.style.top = '0px';
   pageIndicator.textContent = 'Page 0 / 0';
@@ -900,7 +1008,7 @@ function toDateKey(date) {
 }
 
 function buildCsv(rows) {
-  const header = ['row_id', 'page', 'date', 'debit', 'credit', 'balance'];
+  const header = ['row_id', 'page', 'date', 'description', 'debit', 'credit', 'balance'];
   const lines = [header.join(',')];
 
   rows.forEach((row) => {
@@ -908,6 +1016,7 @@ function buildCsv(rows) {
       row.global_row_id || '',
       row.page || '',
       row.date || '',
+      row.description || '',
       row.debit || '',
       row.credit || '',
       row.balance || ''
@@ -957,11 +1066,61 @@ function makeEditableCell(row, field, isAmount = false) {
   return cell;
 }
 
-function makeRowActionButton(label, kind, onClick) {
+function makeRowActionsMenu(rowKey) {
+  const wrap = document.createElement('div');
+  wrap.className = 'row-menu';
+
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'row-action row-action-more';
+  trigger.setAttribute('aria-label', 'Row actions');
+  trigger.title = 'Row actions';
+  trigger.textContent = '...';
+
+  const menu = document.createElement('div');
+  menu.className = 'row-menu-list';
+  menu.innerHTML = ''
+    + '<button type="button" class="row-menu-item row-menu-insert">Insert row</button>'
+    + '<button type="button" class="row-menu-item row-menu-delete">Delete row</button>';
+
+  trigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isOpen = wrap.classList.contains('open');
+    closeAllRowMenus();
+    if (!isOpen) {
+      wrap.classList.add('open');
+    }
+  });
+
+  menu.querySelector('.row-menu-insert').addEventListener('click', (e) => {
+    e.stopPropagation();
+    insertRowAfter(rowKey);
+    closeAllRowMenus();
+  });
+  menu.querySelector('.row-menu-delete').addEventListener('click', (e) => {
+    e.stopPropagation();
+    deleteRowByKey(rowKey);
+    closeAllRowMenus();
+  });
+
+  wrap.appendChild(trigger);
+  wrap.appendChild(menu);
+  return wrap;
+}
+
+function closeAllRowMenus() {
+  document.querySelectorAll('.row-menu.open').forEach((el) => {
+    el.classList.remove('open');
+  });
+}
+
+function makeRowActionButton(iconClass, ariaLabel, kind, onClick) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = `row-action row-action-${kind}`;
-  btn.textContent = label;
+  btn.setAttribute('aria-label', ariaLabel);
+  btn.title = ariaLabel;
+  btn.innerHTML = `<i class="${iconClass}" aria-hidden="true"></i>`;
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     onClick();
@@ -979,6 +1138,7 @@ function insertRowAfter(rowKey) {
     global_row_id: '',
     row_id: '',
     date: '',
+    description: '',
     debit: '',
     credit: '',
     balance: '',
@@ -1045,7 +1205,16 @@ function currentPageKey() {
 
 function updateSummaryFromRows(rows) {
   totalTransactions.textContent = String(rows.length);
+  totalDebitTransactions.textContent = String(countAmountTransactions(rows, 'debit'));
+  totalCreditTransactions.textContent = String(countAmountTransactions(rows, 'credit'));
   endingBalance.textContent = rows.length ? computeAverageDailyBalance(rows) : '-';
+}
+
+function countAmountTransactions(rows, field) {
+  return rows.reduce((count, row) => {
+    const amount = normalizeAmount(row[field]);
+    return Number.isFinite(amount) && Math.abs(amount) > 0 ? count + 1 : count;
+  }, 0);
 }
 
 function getDisplayValue(row, field) {
@@ -1054,6 +1223,7 @@ function getDisplayValue(row, field) {
 
 function normalizeRowDisplayValues(row) {
   row.date = normalizeFieldValue('date', row.date || '');
+  row.description = normalizeFieldValue('description', row.description || '');
   row.debit = normalizeFieldValue('debit', row.debit || '');
   row.credit = normalizeFieldValue('credit', row.credit || '');
   row.balance = normalizeFieldValue('balance', row.balance || '');
@@ -1187,6 +1357,8 @@ function stepToLabel(step) {
 
 function resetResults() {
   totalTransactions.textContent = '0';
+  totalDebitTransactions.textContent = '0';
+  totalCreditTransactions.textContent = '0';
   endingBalance.textContent = '-';
   tableBody.innerHTML = '';
   pageList = [];

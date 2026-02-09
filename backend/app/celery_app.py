@@ -256,6 +256,7 @@ def process_pdf(job_id: str):
                     {
                         "row_id": row.get("row_id"),
                         "date": row.get("date"),
+                        "description": row.get("description"),
                         "debit": row.get("debit"),
                         "credit": row.get("credit"),
                         "balance": row.get("balance"),

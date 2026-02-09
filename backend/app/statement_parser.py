@@ -242,6 +242,7 @@ def parse_words_page(
         return rows, bounds, diagnostics
 
     date_x = header["date"]
+    description_x = header.get("description")
     debit_x = header["debit"]
     credit_x = header["credit"]
     balance_x = header["balance"]
@@ -269,6 +270,16 @@ def parse_words_page(
         debit = debit_txt
         credit = credit_txt
         balance = balance_txt
+        description = _extract_description_from_header_line(
+            line["words"],
+            line_text,
+            profile,
+            date_x,
+            description_x,
+            debit_x,
+            credit_x,
+            balance_x,
+        )
 
         # Fallback amount inference from full line.
         if balance is None:
@@ -289,6 +300,7 @@ def parse_words_page(
         rows.append({
             "row_id": row_id,
             "date": date_iso,
+            "description": description,
             "debit": debit,
             "credit": credit,
             "balance": balance,
@@ -463,6 +475,7 @@ def _find_header_anchors(grouped_lines: List[Dict], profile: BankProfile) -> Opt
         text = " ".join(w["text"] for w in words).lower()
 
         date_x = _find_token_x(text, words, profile.date_tokens)
+        description_x = _find_token_x(text, words, profile.description_tokens)
         debit_x = _find_token_x(text, words, profile.debit_tokens)
         credit_x = _find_token_x(text, words, profile.credit_tokens)
         balance_x = _find_token_x(text, words, profile.balance_tokens)
@@ -481,6 +494,7 @@ def _find_header_anchors(grouped_lines: List[Dict], profile: BankProfile) -> Opt
         return {
             "y": line["cy"],
             "date": date_x,
+            "description": description_x,
             "debit": debit_x,
             "credit": credit_x,
             "balance": balance_x,
@@ -557,6 +571,110 @@ def _assign_amount_columns(
     return debit, credit, balance
 
 
+def _extract_description_from_header_line(
+    words: List[Dict],
+    line_text: str,
+    profile: BankProfile,
+    date_x: float,
+    description_x: Optional[float],
+    debit_x: float,
+    credit_x: float,
+    balance_x: float,
+) -> Optional[str]:
+    if not words:
+        return _extract_description_without_header(line_text, profile)
+
+    flow_left = min(debit_x, credit_x, balance_x)
+    left_anchor = min(date_x, description_x if description_x is not None else date_x)
+    if flow_left <= left_anchor:
+        return _extract_description_without_header(line_text, profile)
+
+    picked: List[str] = []
+    for w in words:
+        cx = (w["x1"] + w["x2"]) / 2.0
+        if cx <= left_anchor + 2.0 or cx >= flow_left - 2.0:
+            continue
+        token = (w.get("text") or "").strip()
+        if not token:
+            continue
+        if normalize_amount(token) is not None:
+            continue
+        if normalize_date(token, profile.date_order) is not None:
+            continue
+        picked.append(token)
+
+    if picked:
+        desc = re.sub(r"\s+", " ", " ".join(picked)).strip(" -:|,")
+        if desc and not _is_noise(desc, profile):
+            return desc
+
+    from_words = _extract_description_from_words(words, profile)
+    if from_words:
+        return from_words
+
+    return _extract_description_without_header(line_text, profile)
+
+
+def _extract_description_without_header(line_text: str, profile: BankProfile) -> Optional[str]:
+    text = (line_text or "").strip()
+    if not text:
+        return None
+
+    search_order = profile.date_order + [m for m in ("mdy", "dmy", "ymd") if m not in profile.date_order]
+    for mode in search_order:
+        for pattern in DATE_PATTERNS.get(mode, []):
+            m = pattern.search(text)
+            if m:
+                text = f"{text[:m.start()]} {text[m.end():]}"
+                break
+        else:
+            continue
+        break
+
+    text = re.sub(r",?\s+\d{1,2}:\d{2}(?::\d{2})?\s*[APMapm]{0,2}$", "", text)
+    text = AMOUNT_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip(" -:|,")
+    if not text:
+        return None
+    if _is_noise(text, profile):
+        return None
+    return text
+
+
+def _extract_description_from_words(words: List[Dict], profile: BankProfile) -> Optional[str]:
+    if not words:
+        return None
+
+    ignored_tokens = {
+        *(t.lower() for t in profile.date_tokens),
+        *(t.lower() for t in profile.description_tokens),
+        *(t.lower() for t in profile.debit_tokens),
+        *(t.lower() for t in profile.credit_tokens),
+        *(t.lower() for t in profile.balance_tokens),
+    }
+
+    parts: List[str] = []
+    for w in sorted(words, key=lambda item: item.get("x1", 0.0)):
+        token = (w.get("text") or "").strip()
+        if not token:
+            continue
+        lower = token.lower()
+        if lower in ignored_tokens:
+            continue
+        if normalize_amount(token) is not None:
+            continue
+        if normalize_date(token, profile.date_order) is not None:
+            continue
+        parts.append(token)
+
+    text = re.sub(r"\s+", " ", " ".join(parts)).strip(" -:|,")
+    if not text:
+        return None
+    if _is_noise(text, profile):
+        return None
+    return text
+
+
 def _extract_line_amounts(line_text: str) -> List[str]:
     out = []
     for m in AMOUNT_RE.findall(line_text):
@@ -630,6 +748,7 @@ def _parse_rows_without_header(
         rows.append({
             "row_id": row_id,
             "date": date_iso,
+            "description": _extract_description_from_words(line_words, profile) or _extract_description_without_header(" ".join(w["text"] for w in line_words), profile),
             "debit": debit,
             "credit": credit,
             "balance": balance,

@@ -11,6 +11,7 @@ import numpy as np
 from app.celery_app import process_pdf, prepare_draft
 from app.bank_profiles import detect_bank_profile
 from app.ocr_engine import ocr_image
+from app.pdf_text_extract import extract_pdf_layout_pages
 from app.statement_parser import parse_page_with_profile_fallback
 from app.image_cleaner import clean_page
 
@@ -228,7 +229,14 @@ def get_parsed_rows(job_id: str, page: str):
     with open(path) as f:
         data = json.load(f)
 
-    return data.get(page, [])
+    page_rows = data.get(page, [])
+    if _rows_need_description_backfill(page_rows):
+        page_rows = _backfill_page_descriptions(job_id, page, page_rows)
+        data[page] = page_rows
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+
+    return page_rows
 
 
 @app.get("/jobs/{job_id}/diagnostics")
@@ -326,6 +334,7 @@ def _reparse_single_page(job_id: str, page: str):
             {
                 "row_id": row.get("row_id"),
                 "date": row.get("date"),
+                "description": row.get("description"),
                 "debit": row.get("debit"),
                 "credit": row.get("credit"),
                 "balance": row.get("balance"),
@@ -370,6 +379,78 @@ def _reparse_single_page(job_id: str, page: str):
     }
     with open(diagnostics_path, "w") as f:
         json.dump(diagnostics_data, f, indent=2)
+
+
+def _rows_need_description_backfill(rows: List[Dict]) -> bool:
+    if not rows:
+        return False
+    for row in rows:
+        if "description" not in row or not str(row.get("description") or "").strip():
+            return True
+    return False
+
+
+def _backfill_page_descriptions(job_id: str, page: str, page_rows: List[Dict]) -> List[Dict]:
+    if not page_rows:
+        return page_rows
+
+    job_dir = os.path.join(DATA_DIR, "jobs", job_id)
+    input_pdf = os.path.join(job_dir, "input", "document.pdf")
+    cleaned_path = os.path.join(job_dir, "cleaned", f"{page}.png")
+    ocr_path = os.path.join(job_dir, "ocr", f"{page}.json")
+
+    row_desc: Dict[str, str] = {}
+
+    try:
+        page_num = int(str(page).replace("page_", ""))
+    except Exception:
+        page_num = 0
+
+    # Prefer text-layer parse when available for better descriptions.
+    if os.path.exists(input_pdf) and page_num > 0:
+        try:
+            layouts = extract_pdf_layout_pages(input_pdf)
+            if 0 < page_num <= len(layouts):
+                layout = layouts[page_num - 1]
+                layout_words = layout.get("words", []) if isinstance(layout, dict) else []
+                profile = detect_bank_profile(layout.get("text", "") if isinstance(layout, dict) else "")
+                parsed, _, _ = parse_page_with_profile_fallback(
+                    layout_words,
+                    float(layout.get("width", 1) if isinstance(layout, dict) else 1),
+                    float(layout.get("height", 1) if isinstance(layout, dict) else 1),
+                    profile,
+                )
+                row_desc = {str(r.get("row_id")): (r.get("description") or "") for r in parsed}
+        except Exception:
+            row_desc = {}
+
+    # OCR fallback when text extraction is unavailable.
+    if not row_desc and os.path.exists(cleaned_path):
+        try:
+            img = cv2.imread(cleaned_path)
+            if img is not None:
+                h, w = img.shape[:2]
+                if os.path.exists(ocr_path):
+                    with open(ocr_path) as f:
+                        ocr_items = json.load(f)
+                else:
+                    ocr_items = ocr_image(cleaned_path, backend="easyocr")
+                ocr_words = _ocr_items_to_words(ocr_items)
+                ocr_text = " ".join((item.get("text") or "") for item in ocr_items)
+                profile = detect_bank_profile(ocr_text)
+                parsed, _, _ = parse_page_with_profile_fallback(ocr_words, w, h, profile)
+                row_desc = {str(r.get("row_id")): (r.get("description") or "") for r in parsed}
+        except Exception:
+            row_desc = {}
+
+    enriched = []
+    for row in page_rows:
+        rid = str(row.get("row_id") or "")
+        existing_desc = str(row.get("description") or "").strip()
+        merged = dict(row)
+        merged["description"] = existing_desc or row_desc.get(rid, "")
+        enriched.append(merged)
+    return enriched
 
 
 def _order_points(pts: np.ndarray) -> np.ndarray:

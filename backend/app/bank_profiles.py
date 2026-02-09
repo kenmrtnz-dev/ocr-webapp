@@ -6,6 +6,7 @@ from typing import Dict, List
 class BankProfile:
     name: str
     date_tokens: List[str]
+    description_tokens: List[str]
     debit_tokens: List[str]
     credit_tokens: List[str]
     balance_tokens: List[str]
@@ -18,6 +19,7 @@ PROFILES: Dict[str, BankProfile] = {
     "GENERIC": BankProfile(
         name="GENERIC",
         date_tokens=["date", "book date", "posting date", "value date", "transaction date"],
+        description_tokens=["description", "details", "particulars", "narration", "remarks", "reference"],
         debit_tokens=["debit", "debits", "withdrawal", "withdrawals"],
         credit_tokens=["credit", "credits", "deposit", "deposits"],
         balance_tokens=["balance", "ending balance", "closing balance", "end balance", "running balance"],
@@ -28,6 +30,7 @@ PROFILES: Dict[str, BankProfile] = {
     "AUB_BDO": BankProfile(
         name="AUB_BDO",
         date_tokens=["date", "book date"],
+        description_tokens=["description", "particulars", "details", "remarks", "reference"],
         debit_tokens=["debit"],
         credit_tokens=["credit"],
         balance_tokens=["balance", "closing balance"],
@@ -38,6 +41,7 @@ PROFILES: Dict[str, BankProfile] = {
     "EWB": BankProfile(
         name="EWB",
         date_tokens=["book date", "value date", "date"],
+        description_tokens=["description", "details", "particulars", "transaction details", "remarks"],
         debit_tokens=["debit", "withdrawal"],
         credit_tokens=["credit", "deposit"],
         balance_tokens=["closing balance", "balance"],
@@ -48,6 +52,7 @@ PROFILES: Dict[str, BankProfile] = {
     "MAYBANK": BankProfile(
         name="MAYBANK",
         date_tokens=["posting date", "date"],
+        description_tokens=["description", "details", "particulars", "narration", "remarks", "ref no"],
         debit_tokens=["debit", "withdrawal"],
         credit_tokens=["credit", "deposit"],
         balance_tokens=["end balance", "ending balance", "balance"],
@@ -58,6 +63,7 @@ PROFILES: Dict[str, BankProfile] = {
     "UNIONBANK": BankProfile(
         name="UNIONBANK",
         date_tokens=["date", "value date"],
+        description_tokens=["description", "details", "particulars", "remarks", "reference"],
         debit_tokens=["debits", "debit"],
         credit_tokens=["credits", "credit"],
         balance_tokens=["ending balance", "balance"],
@@ -68,6 +74,7 @@ PROFILES: Dict[str, BankProfile] = {
     "BPI": BankProfile(
         name="BPI",
         date_tokens=["date", "transaction date", "posting date"],
+        description_tokens=["description", "details", "particulars", "remarks", "reference"],
         debit_tokens=["debit", "debits", "withdrawal", "withdrawals"],
         credit_tokens=["credit", "credits", "deposit", "deposits"],
         balance_tokens=["balance", "ending balance", "running balance"],
@@ -78,6 +85,7 @@ PROFILES: Dict[str, BankProfile] = {
     "CHINABANK": BankProfile(
         name="CHINABANK",
         date_tokens=["date", "txn date", "transaction date", "value date"],
+        description_tokens=["description", "details", "particulars", "remarks", "reference"],
         debit_tokens=["debit", "debits", "withdrawal", "withdrawals"],
         credit_tokens=["credit", "credits", "deposit", "deposits"],
         balance_tokens=["balance", "ending balance", "running balance", "outstanding balance"],

@@ -65,6 +65,14 @@
                             <div class="summary-value" id="totalTransactions">45</div>
                         </div>
                         <div class="summary-item">
+                            <div class="summary-label">Debit Transactions</div>
+                            <div class="summary-value" id="totalDebitTransactions">0</div>
+                        </div>
+                        <div class="summary-item">
+                            <div class="summary-label">Credit Transactions</div>
+                            <div class="summary-value" id="totalCreditTransactions">0</div>
+                        </div>
+                        <div class="summary-item">
                             <div class="summary-label">Average Daily Balance (ADB)</div>
                             <div class="summary-value" id="endingBalance">₱0.00</div>
                         </div>
@@ -84,6 +92,7 @@
                                 <div class="table-header">
                                     <div class="table-cell">#</div>
                                     <div class="table-cell">Date</div>
+                                    <div class="table-cell">Description</div>
                                     <div class="table-cell">Debit</div>
                                     <div class="table-cell">Credit</div>
                                     <div class="table-cell">Balance</div>
@@ -97,6 +106,9 @@
                                 <button class="preview-nav" id="prevPageBtn">Prev</button>
                                 <span id="pageIndicator">Page 0 / 0</span>
                                 <button class="preview-nav" id="nextPageBtn">Next</button>
+                                <select class="preview-page-select" id="pageSelect" aria-label="Jump to page">
+                                    <option value="">Page</option>
+                                </select>
                                 <button class="preview-nav" id="flattenModeBtn">Flatten</button>
                                 <button class="preview-nav" id="applyFlattenBtn">Apply</button>
                                 <button class="preview-nav" id="resetFlattenBtn">Reset</button>
@@ -104,6 +116,7 @@
                             <div class="preview-canvas-wrap">
                                 <img id="previewImage" alt="Statement page preview">
                                 <canvas id="previewCanvas"></canvas>
+                                <div id="previewMagnifier" aria-hidden="true"></div>
                             </div>
                         </div>
                     </div>
