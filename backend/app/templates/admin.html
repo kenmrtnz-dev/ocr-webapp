@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Portal - Statement Analyzer</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body data-page-role="admin">
+    <div class="container">
+        <header class="agent-portal-header">
+            <h1 class="agent-portal-title">Admin Portal</h1>
+            <div class="agent-portal-user">
+                <span id="authUserBadge" class="auth-user-badge">Not logged in</span>
+                <button id="authLogoutBtn" class="preview-nav agent-header-logout" style="display:none;">Logout</button>
+            </div>
+        </header>
+
+        <section class="workflow-shell">
+            <div class="workflow-panel">
+                <div class="workflow-panel-head">
+                    <h3>User Management</h3>
+                </div>
+
+                <form id="adminCreateUserForm" class="admin-user-form">
+                    <input id="adminUserEmail" type="email" placeholder="Email" required>
+                    <input id="adminUserPassword" type="password" placeholder="Password" required>
+                    <select id="adminUserRole" required>
+                        <option value="agent">Agent</option>
+                        <option value="credit_evaluator">Credit Evaluator</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                    <button id="adminCreateUserBtn" type="submit" class="preview-nav">Add User</button>
+                </form>
+
+                <div class="agent-submissions-table-wrap">
+                    <div class="agent-submissions-toolbar">
+                        <div class="agent-submissions-table-title">Users</div>
+                    </div>
+                    <div id="adminUsersTable" class="agent-submissions-table"></div>
+                </div>
+            </div>
+
+            <div class="workflow-panel">
+                <div class="workflow-panel-head">
+                    <h3>Data Controls</h3>
+                </div>
+                <div class="admin-danger-zone">
+                    <p class="admin-danger-text">
+                        Clear all submitted files, jobs, transactions, reports, and audit logs.
+                    </p>
+                    <button id="adminClearDataBtn" class="preview-nav admin-danger-btn">Clear Submitted Files Data</button>
+                    <p id="adminClearDataMsg" class="admin-danger-msg"></p>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <script src="/static/admin.js"></script>
+</body>
+</html>

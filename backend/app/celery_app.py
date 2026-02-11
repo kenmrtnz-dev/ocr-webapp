@@ -14,9 +14,10 @@ from app.ocr_engine import ocr_image
 from app.pdf_text_extract import extract_pdf_layout_pages
 from app.profile_analyzer import analyze_account_identity_from_text, analyze_unknown_bank_and_apply
 from app.statement_parser import parse_page_with_profile_fallback, is_transaction_row
+from app.workflow_service import sync_job_results, upsert_job_status
 
 
-DATA_DIR = os.getenv("DATA_DIR", "/data")
+DATA_DIR = os.getenv("DATA_DIR", "./data")
 PREVIEW_DPI = int(os.getenv("PREVIEW_DPI", "130"))
 PREVIEW_DRAFT_DPI = int(os.getenv("PREVIEW_DRAFT_DPI", "100"))
 PREVIEW_MAX_PIXELS = int(os.getenv("PREVIEW_MAX_PIXELS", "6000000"))
@@ -482,6 +483,11 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
         with open(os.path.join(result_dir, "parse_diagnostics.json"), "w") as f:
             json.dump(diagnostics, f, indent=2)
 
+        try:
+            sync_job_results(job_id, parsed_output, bounds_output, diagnostics)
+        except Exception as exc:
+            print(f"[WORKER] Warning: sync_job_results failed for {job_id}: {exc}")
+
         report("done", "completed", 100, pages=len(page_files), ocr_backend=OCR_BACKEND)
         print(f"[WORKER] Finished job {job_id}")
         return {"pages": len(page_files)}
@@ -510,6 +516,11 @@ def update_status(job_dir, status, **extra):
         json.dump(data, f)
 
     os.replace(tmp_path, final_path)
+    try:
+        job_id = os.path.basename(job_dir.rstrip("/"))
+        upsert_job_status(job_id, data)
+    except Exception as exc:
+        print(f"[WORKER] Warning: upsert_job_status failed: {exc}")
 
 
 def _normalize_parse_mode(mode: str | None) -> str:
