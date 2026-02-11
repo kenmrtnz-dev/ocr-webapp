@@ -154,6 +154,18 @@ def detect_bank_profile(page_text: str) -> BankProfile:
     for rule in DETECTION_RULES:
         if _matches_rule(lower, rule):
             return PROFILES[rule.profile]
+    bdo_digital_profile = PROFILES.get("AUTO_BUSINESS_BANKING_GROWIDE")
+    if bdo_digital_profile:
+        bdo_digital_tokens = [
+            "posting date",
+            "description",
+            "debit",
+            "credit",
+            "running balance",
+            "check number",
+        ]
+        if all(token in lower for token in bdo_digital_tokens):
+            return bdo_digital_profile
     return PROFILES["GENERIC"]
 
 
