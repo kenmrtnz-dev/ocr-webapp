@@ -11,6 +11,11 @@ const progressLabel = document.getElementById('progressLabel');
 const progressStep = document.getElementById('progressStep');
 const progressElapsed = document.getElementById('progressElapsed');
 const progressModel = document.getElementById('progressModel');
+const analyzerStatus = document.getElementById('analyzerStatus');
+const progressAnalyzerRow = document.getElementById('progressAnalyzerRow');
+const analyzerModel = document.getElementById('analyzerModel');
+const analyzerProfile = document.getElementById('analyzerProfile');
+const analyzerReason = document.getElementById('analyzerReason');
 const downloadCSV = document.getElementById('downloadCSV');
 const viewDetails = document.getElementById('viewDetails');
 const finishSave = document.getElementById('finishSave');
@@ -448,12 +453,12 @@ async function pollDraftUntilReady() {
       throw new Error(status.message || 'Draft preparation failed');
     }
 
-    updateProgressUI(progress, stepToLabel(step), step, currentOcrModel);
+    updateProgressUI(progress, stepToLabel(step), step, currentOcrModel, currentMode, status);
 
     if (status.status === 'draft' && step === 'ready_for_edit') {
       stopElapsedTimer();
       await loadDraftPages();
-      updateProgressUI(100, 'Edit pages then click Start OCR', 'ready_for_edit', currentOcrModel);
+      updateProgressUI(100, 'Edit pages then click Start OCR', 'ready_for_edit', currentOcrModel, currentMode, status);
       return;
     }
 
@@ -520,7 +525,7 @@ async function pollJobUntilDone() {
     }
 
     if (status.status === 'done') {
-      updateProgressUI(100, 'Results ready', step, currentOcrModel, currentMode);
+      updateProgressUI(100, 'Results ready', step, currentOcrModel, currentMode, status);
       await loadResults();
       if (shouldAutoScrollToResults && hasSeenInFlightStatus) {
         shouldAutoScrollToResults = false;
@@ -531,11 +536,11 @@ async function pollJobUntilDone() {
     }
 
     if (status.status === 'failed') {
-      updateProgressUI(progress, status.message || 'OCR job failed', step, currentOcrModel, currentMode);
+      updateProgressUI(progress, status.message || 'OCR job failed', step, currentOcrModel, currentMode, status);
       throw new Error(status.message || 'OCR job failed');
     }
 
-    updateProgressUI(progress, stepToLabel(step), step, currentOcrModel, currentMode);
+    updateProgressUI(progress, stepToLabel(step), step, currentOcrModel, currentMode, status);
     await sleep(1200);
   }
 }
@@ -1575,7 +1580,7 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function updateProgressUI(progress, labelText, step, ocrModel = null, parseMode = null) {
+function updateProgressUI(progress, labelText, step, ocrModel = null, parseMode = null, status = null) {
   const clamped = Math.max(0, Math.min(100, Math.round(progress)));
   progressFill.style.width = `${clamped}%`;
   progressPercent.textContent = `${clamped}%`;
@@ -1584,6 +1589,18 @@ function updateProgressUI(progress, labelText, step, ocrModel = null, parseMode 
   if (progressModel) {
     const modeLabel = (parseMode || 'text').toString().toUpperCase();
     progressModel.textContent = `Mode: ${modeLabel}${modeLabel === 'OCR' ? ` | OCR Model: ${ocrModel || '-'}` : ''}`;
+  }
+  if (analyzerStatus && progressAnalyzerRow && analyzerModel && analyzerProfile && analyzerReason) {
+    const modelText = status && status.profile_analyzer_model ? status.profile_analyzer_model : '-';
+    const resultText = status && status.profile_analyzer_result ? status.profile_analyzer_result : 'idle';
+    const reasonText = status && status.profile_analyzer_reason ? status.profile_analyzer_reason : '-';
+    const profileText = status && status.profile_selected_after_analyzer ? status.profile_selected_after_analyzer : '-';
+    const triggered = Boolean(status && status.profile_analyzer_triggered);
+    analyzerStatus.textContent = `AI Analyzer: ${triggered ? capitalizeWord(resultText) : 'Idle'}`;
+    analyzerModel.textContent = `Model: ${modelText}`;
+    analyzerProfile.textContent = `Profile: ${profileText}`;
+    analyzerReason.textContent = `Reason: ${reasonText}`;
+    progressAnalyzerRow.classList.toggle('is-hidden', !triggered);
   }
   if (progressElapsed && !elapsedStartMs) {
     progressElapsed.textContent = 'Elapsed: 00:00';
@@ -1661,6 +1678,7 @@ function stepToLabel(step) {
   if (key === 'pdf_to_images') return 'Converting PDF to images';
   if (key === 'image_cleaning') return 'Cleaning page images';
   if (key === 'text_extraction') return 'Extracting PDF text';
+  if (key === 'profile_analyzer') return 'Analyzing unknown bank structure';
   if (key === 'page_ocr') return 'Running OCR per page';
   if (key === 'page_text') return 'Parsing text per page';
   if (key === 'saving_results') return 'Saving results';
@@ -1668,6 +1686,12 @@ function stepToLabel(step) {
   if (key === 'completed' || key === 'done') return 'Completed';
   if (key === 'failed') return 'Failed';
   return 'Processing';
+}
+
+function capitalizeWord(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function resetResults() {

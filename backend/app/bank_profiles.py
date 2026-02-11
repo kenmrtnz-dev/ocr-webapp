@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -28,11 +29,15 @@ class DetectionRule:
     contains_all: List[str]
 
 
+def _default_packaged_config_path() -> Path:
+    return Path(__file__).with_name("bank_profiles.json")
+
+
 def _config_path() -> Path:
     configured = os.getenv("BANK_PROFILES_CONFIG", "").strip()
     if configured:
         return Path(configured)
-    return Path(__file__).with_name("bank_profiles.json")
+    return Path("/data/config/bank_profiles.json")
 
 
 def _normalize_items(values: List[str]) -> List[str]:
@@ -40,9 +45,20 @@ def _normalize_items(values: List[str]) -> List[str]:
 
 
 def _load_profiles_config() -> Tuple[Dict[str, BankProfile], List[DetectionRule]]:
+    global ACTIVE_CONFIG_PATH
     path = _config_path()
     if not path.exists():
+        packaged = _default_packaged_config_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if packaged.exists():
+                shutil.copyfile(packaged, path)
+        except Exception:
+            if packaged.exists():
+                path = packaged
+    if not path.exists():
         raise RuntimeError(f"bank_profiles_config_missing:{path}")
+    ACTIVE_CONFIG_PATH = path
 
     with path.open() as f:
         data = json.load(f)
@@ -84,7 +100,25 @@ def _load_profiles_config() -> Tuple[Dict[str, BankProfile], List[DetectionRule]
     return profiles, rules
 
 
-PROFILES, DETECTION_RULES = _load_profiles_config()
+PROFILES: Dict[str, BankProfile] = {}
+DETECTION_RULES: List[DetectionRule] = []
+ACTIVE_CONFIG_PATH: Path = _config_path()
+
+
+def reload_profiles() -> Tuple[Dict[str, BankProfile], List[DetectionRule]]:
+    profiles, rules = _load_profiles_config()
+    PROFILES.clear()
+    PROFILES.update(profiles)
+    DETECTION_RULES.clear()
+    DETECTION_RULES.extend(rules)
+    return PROFILES, DETECTION_RULES
+
+
+reload_profiles()
+
+
+def get_profiles_config_path() -> Path:
+    return ACTIVE_CONFIG_PATH
 
 
 def _matches_rule(text: str, rule: DetectionRule) -> bool:

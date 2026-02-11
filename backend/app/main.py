@@ -12,7 +12,7 @@ from pdf2image import convert_from_path
 from PIL import Image
 
 from app.celery_app import process_pdf, prepare_draft
-from app.bank_profiles import detect_bank_profile, extract_account_identity, find_value_bounds
+from app.bank_profiles import detect_bank_profile, extract_account_identity, find_value_bounds, reload_profiles
 from app.ocr_engine import ocr_image
 from app.pdf_text_extract import extract_pdf_layout_pages
 from app.statement_parser import parse_page_with_profile_fallback, is_transaction_row
@@ -401,6 +401,7 @@ def _read_job_parse_mode(job_dir: str) -> str:
 
 def _reparse_single_page(job_id: str, page: str):
     job_dir = os.path.join(DATA_DIR, "jobs", job_id)
+    reload_profiles()
     parse_mode = _read_job_parse_mode(job_dir)
     input_pdf = os.path.join(job_dir, "input", "document.pdf")
     cleaned_path = os.path.join(job_dir, "cleaned", f"{page}.png")
