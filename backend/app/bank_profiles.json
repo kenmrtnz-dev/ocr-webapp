@@ -10,6 +10,7 @@
       "noise_tokens": ["balance at period", "beginning balance", "brought forward"],
       "ocr_backends": ["paddleocr", "tesseract", "easyocr"],
       "account_name_patterns": [
+        "^\\s*([A-Z][A-Z0-9 .,\\-'/&]{2,120}?(?:CORPORATION|CORP\\.?|INC\\.?|COMPANY|CO\\.?|LIMITED|LTD\\.?))\\b",
         "account\\s*name\\s*[:\\-]?\\s*([A-Z0-9][A-Z0-9 .,\\-'/&]{2,90})",
         "account\\s*holder\\s*[:\\-]?\\s*([A-Z0-9][A-Z0-9 .,\\-'/&]{2,90})",
         "depositor\\s*name\\s*[:\\-]?\\s*([A-Z0-9][A-Z0-9 .,\\-'/&]{2,90})"
@@ -20,7 +21,7 @@
         "casa\\s*(?:no\\.?|#)\\s*[:\\-]?\\s*([0-9Xx\\-\\s]{6,40})"
       ]
     },
-    "AUB_BDO": {
+    "AUB": {
       "date_tokens": ["date", "book date"],
       "description_tokens": ["description", "particulars", "details", "remarks", "reference"],
       "debit_tokens": ["debit"],
@@ -30,6 +31,7 @@
       "noise_tokens": ["balance carried forward", "balance at period"],
       "ocr_backends": ["paddleocr", "tesseract", "easyocr"],
       "account_name_patterns": [
+        "^\\s*([A-Z][A-Z0-9 .,\\-'/&]{2,120}?(?:CORPORATION|CORP\\.?|INC\\.?|COMPANY|CO\\.?|LIMITED|LTD\\.?))\\b",
         "account\\s*name\\s*[:\\-]?\\s*([A-Z0-9][A-Z0-9 .,\\-'/&]{2,90})",
         "depositor\\s*name\\s*[:\\-]?\\s*([A-Z0-9][A-Z0-9 .,\\-'/&]{2,90})"
       ],
@@ -197,9 +199,28 @@
       "contains_all": ["book date", "closing balance"]
     },
     {
-      "profile": "AUB_BDO",
-      "contains_any": ["asia united bank", " aub ", "bdo", "check no.", "channel code"],
+      "profile": "AUB",
+      "contains_any": [
+        "asia united bank",
+        "aub",
+        "asia united bank corporation",
+        "pesonet sending to other bank",
+        "pesonet sending service charge",
+        "instapay sending service charg",
+        "casa fund transfer credit",
+        "casa fund transfer debit"
+      ],
       "contains_all": []
+    },
+    {
+      "profile": "AUB",
+      "contains_any": [],
+      "contains_all": ["check no.", "channel code"]
+    },
+    {
+      "profile": "AUB",
+      "contains_any": [],
+      "contains_all": ["period coverage", "check no."]
     }
   ]
 }

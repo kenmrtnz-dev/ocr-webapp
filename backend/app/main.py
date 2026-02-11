@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 import uuid, os, json
-from typing import List, Dict
+from typing import List, Dict, Optional
 import cv2
 import numpy as np
 import math
@@ -15,6 +15,7 @@ from app.celery_app import process_pdf, prepare_draft
 from app.bank_profiles import detect_bank_profile, extract_account_identity, find_value_bounds, reload_profiles
 from app.ocr_engine import ocr_image
 from app.pdf_text_extract import extract_pdf_layout_pages
+from app.profile_analyzer import analyze_account_identity_from_text
 from app.statement_parser import parse_page_with_profile_fallback, is_transaction_row
 from app.image_cleaner import clean_page
 
@@ -325,7 +326,36 @@ def get_parse_diagnostics(job_id: str):
         raise HTTPException(status_code=404, detail="Diagnostics not ready")
 
     with open(path) as f:
-        return json.load(f)
+        diagnostics = json.load(f)
+
+    diagnostics = _backfill_job_account_identity(job_id, diagnostics, path)
+    return diagnostics
+
+
+@app.get("/jobs/{job_id}/account-identity")
+def get_account_identity(job_id: str):
+    path = os.path.join(DATA_DIR, "jobs", job_id, "result", "parse_diagnostics.json")
+
+    diagnostics: Dict = {"job": {}, "pages": {}}
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                diagnostics = json.load(f)
+        except Exception:
+            diagnostics = {"job": {}, "pages": {}}
+
+    diagnostics = _backfill_job_account_identity(job_id, diagnostics, path if os.path.exists(path) else None)
+    job = diagnostics.get("job", {}) if isinstance(diagnostics, dict) else {}
+    return {
+        "account_name": job.get("account_name"),
+        "account_number": job.get("account_number"),
+        "account_name_bbox": job.get("account_name_bbox"),
+        "account_number_bbox": job.get("account_number_bbox"),
+        "account_identity_source": job.get("account_identity_source"),
+        "account_identity_ai_attempted": job.get("account_identity_ai_attempted"),
+        "account_identity_ai_result": job.get("account_identity_ai_result"),
+        "account_identity_ai_reason": job.get("account_identity_ai_reason"),
+    }
 
 
 class FlattenPoint(BaseModel):
@@ -502,11 +532,23 @@ def _reparse_single_page(job_id: str, page: str):
         with open(diagnostics_path) as f:
             diagnostics_data = json.load(f)
     account_identity = extract_account_identity(profile_text, profile)
+    if (not account_identity.get("account_name") or not account_identity.get("account_number")) and profile_text:
+        ai_identity = analyze_account_identity_from_text(profile_text)
+        if not account_identity.get("account_name"):
+            account_identity["account_name"] = ai_identity.get("account_name")
+        if not account_identity.get("account_number"):
+            account_identity["account_number"] = ai_identity.get("account_number")
     account_name_bbox = find_value_bounds(parser_words, parser_w, parser_h, account_identity.get("account_name"), page)
     account_number_bbox = find_value_bounds(parser_words, parser_w, parser_h, account_identity.get("account_number"), page)
     if parse_mode == "ocr" and ocr_items:
         ocr_text = " ".join((item.get("text") or "") for item in ocr_items)
         account_identity = extract_account_identity(ocr_text, profile)
+        if not account_identity.get("account_name") or not account_identity.get("account_number"):
+            ai_identity = analyze_account_identity_from_text(ocr_text)
+            if not account_identity.get("account_name"):
+                account_identity["account_name"] = ai_identity.get("account_name")
+            if not account_identity.get("account_number"):
+                account_identity["account_number"] = ai_identity.get("account_number")
         ocr_words = _ocr_items_to_words(ocr_items)
         account_name_bbox = find_value_bounds(ocr_words, page_w, page_h, account_identity.get("account_name"), page)
         account_number_bbox = find_value_bounds(ocr_words, page_w, page_h, account_identity.get("account_number"), page)
@@ -540,6 +582,119 @@ def _rows_need_description_backfill(rows: List[Dict]) -> bool:
         if "description" not in row or not str(row.get("description") or "").strip():
             return True
     return False
+
+
+def _backfill_job_account_identity(job_id: str, diagnostics: Dict, diagnostics_path: Optional[str]) -> Dict:
+    if not isinstance(diagnostics, dict):
+        return diagnostics
+
+    job = diagnostics.setdefault("job", {})
+    account_name = str(job.get("account_name") or "").strip()
+    account_number = str(job.get("account_number") or "").strip()
+    if not _identity_missing(account_name) and not _identity_missing(account_number):
+        return diagnostics
+
+    job_dir = os.path.join(DATA_DIR, "jobs", job_id)
+    input_pdf = os.path.join(job_dir, "input", "document.pdf")
+    page = "page_001"
+
+    first_text = ""
+    first_words: List[Dict] = []
+    first_w = 1.0
+    first_h = 1.0
+
+    if os.path.exists(input_pdf):
+        try:
+            layouts = extract_pdf_layout_pages(input_pdf)
+            if layouts:
+                first = layouts[0] if isinstance(layouts[0], dict) else {}
+                first_text = str(first.get("text") or "").strip()
+                first_words = first.get("words", []) if isinstance(first.get("words", []), list) else []
+                first_w = float(first.get("width", 1) or 1)
+                first_h = float(first.get("height", 1) or 1)
+        except Exception:
+            first_text = ""
+            first_words = []
+
+    profile = detect_bank_profile(first_text)
+    identity = extract_account_identity(first_text, profile)
+    if (not identity.get("account_name") or not identity.get("account_number")) and first_text:
+        ai_identity = analyze_account_identity_from_text(first_text)
+        if not identity.get("account_name"):
+            identity["account_name"] = ai_identity.get("account_name")
+        if not identity.get("account_number"):
+            identity["account_number"] = ai_identity.get("account_number")
+        if ai_identity.get("account_name") or ai_identity.get("account_number"):
+            job["account_identity_source"] = "ai_first_page"
+            job["account_identity_ai_attempted"] = True
+            job["account_identity_ai_result"] = ai_identity.get("result")
+            job["account_identity_ai_reason"] = ai_identity.get("reason")
+
+    # OCR fallback when text layer is unavailable.
+    if (not identity.get("account_name") or not identity.get("account_number")):
+        ocr_path = os.path.join(job_dir, "ocr", f"{page}.json")
+        if os.path.exists(ocr_path):
+            try:
+                with open(ocr_path) as f:
+                    ocr_items = json.load(f)
+                ocr_text = " ".join((item.get("text") or "") for item in ocr_items)
+                ocr_words = _ocr_items_to_words(ocr_items)
+                profile_ocr = detect_bank_profile(ocr_text)
+                identity_ocr = extract_account_identity(ocr_text, profile_ocr)
+                if not identity.get("account_name"):
+                    identity["account_name"] = identity_ocr.get("account_name")
+                if not identity.get("account_number"):
+                    identity["account_number"] = identity_ocr.get("account_number")
+                if (not identity.get("account_name") or not identity.get("account_number")) and ocr_text:
+                    ai_identity = analyze_account_identity_from_text(ocr_text)
+                    if not identity.get("account_name"):
+                        identity["account_name"] = ai_identity.get("account_name")
+                    if not identity.get("account_number"):
+                        identity["account_number"] = ai_identity.get("account_number")
+                    if ai_identity.get("account_name") or ai_identity.get("account_number"):
+                        job["account_identity_source"] = "ai_first_page_ocr"
+                        job["account_identity_ai_attempted"] = True
+                        job["account_identity_ai_result"] = ai_identity.get("result")
+                        job["account_identity_ai_reason"] = ai_identity.get("reason")
+                if ocr_words:
+                    first_words = ocr_words
+                    max_x = max(float(w.get("x2", 0.0)) for w in ocr_words) if ocr_words else 1.0
+                    max_y = max(float(w.get("y2", 0.0)) for w in ocr_words) if ocr_words else 1.0
+                    first_w = max(1.0, max_x)
+                    first_h = max(1.0, max_y)
+            except Exception:
+                pass
+
+    changed = False
+    if identity.get("account_name") and (_identity_missing(job.get("account_name")) or identity.get("account_name") != job.get("account_name")):
+        job["account_name"] = identity.get("account_name")
+        changed = True
+    if identity.get("account_number") and (_identity_missing(job.get("account_number")) or identity.get("account_number") != job.get("account_number")):
+        job["account_number"] = identity.get("account_number")
+        changed = True
+
+    if first_words and first_w > 0 and first_h > 0:
+        name_bbox = find_value_bounds(first_words, first_w, first_h, job.get("account_name"), page)
+        number_bbox = find_value_bounds(first_words, first_w, first_h, job.get("account_number"), page)
+        if name_bbox and name_bbox != job.get("account_name_bbox"):
+            job["account_name_bbox"] = name_bbox
+            changed = True
+        if number_bbox and number_bbox != job.get("account_number_bbox"):
+            job["account_number_bbox"] = number_bbox
+            changed = True
+
+    if changed and diagnostics_path:
+        try:
+            with open(diagnostics_path, "w") as f:
+                json.dump(diagnostics, f, indent=2)
+        except Exception:
+            pass
+    return diagnostics
+
+
+def _identity_missing(value) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {"", "-", "none", "null", "n/a", "na"}
 
 
 def _backfill_page_descriptions(job_id: str, page: str, page_rows: List[Dict]) -> List[Dict]:

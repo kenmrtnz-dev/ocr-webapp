@@ -44,6 +44,26 @@ def _normalize_items(values: List[str]) -> List[str]:
     return [str(v).strip().lower() for v in values if str(v).strip()]
 
 
+def _normalize_capture_patterns(values: List[str]) -> List[str]:
+    normalized: List[str] = []
+    for raw in values:
+        text = str(raw).strip()
+        if not text:
+            continue
+        try:
+            compiled = re.compile(text, flags=re.IGNORECASE | re.MULTILINE)
+        except re.error:
+            continue
+        if compiled.groups < 1:
+            text = f"({text})"
+            try:
+                re.compile(text, flags=re.IGNORECASE | re.MULTILINE)
+            except re.error:
+                continue
+        normalized.append(text)
+    return normalized
+
+
 def _load_profiles_config() -> Tuple[Dict[str, BankProfile], List[DetectionRule]]:
     global ACTIVE_CONFIG_PATH
     path = _config_path()
@@ -80,8 +100,8 @@ def _load_profiles_config() -> Tuple[Dict[str, BankProfile], List[DetectionRule]
             date_order=[str(v).strip().lower() for v in raw.get("date_order", []) if str(v).strip()],
             noise_tokens=_normalize_items(raw.get("noise_tokens", [])),
             ocr_backends=[str(v).strip().lower() for v in raw.get("ocr_backends", []) if str(v).strip()],
-            account_name_patterns=[str(v).strip() for v in raw.get("account_name_patterns", []) if str(v).strip()],
-            account_number_patterns=[str(v).strip() for v in raw.get("account_number_patterns", []) if str(v).strip()],
+            account_name_patterns=_normalize_capture_patterns(raw.get("account_name_patterns", [])),
+            account_number_patterns=_normalize_capture_patterns(raw.get("account_number_patterns", [])),
         )
 
     rules: List[DetectionRule] = []
@@ -145,7 +165,11 @@ def _extract_first(text: str, patterns: List[str]) -> Optional[str]:
             continue
         if not m:
             continue
-        value = (m.group(1) or "").strip()
+        try:
+            captured = m.group(1) if m.lastindex and m.lastindex >= 1 else m.group(0)
+        except IndexError:
+            captured = m.group(0)
+        value = (captured or "").strip()
         if value:
             return value
     return None
@@ -309,8 +333,14 @@ def _value_tokens(value: str) -> List[str]:
 def _token_matches(word_token: str, value_token: str) -> bool:
     if not word_token or not value_token:
         return False
+    if _is_strict_numeric_token(value_token):
+        return word_token == value_token
     return (
         word_token == value_token
         or word_token in value_token
         or value_token in word_token
     )
+
+
+def _is_strict_numeric_token(token: str) -> bool:
+    return bool(token) and len(token) >= 6 and re.fullmatch(r"[0-9x]+", token) is not None

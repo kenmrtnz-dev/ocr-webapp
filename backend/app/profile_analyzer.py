@@ -19,6 +19,228 @@ from app.bank_profiles import (
 from app.statement_parser import is_transaction_row, parse_words_page
 
 
+def analyze_account_identity_from_text(page_text: str) -> Dict:
+    provider = str(os.getenv("AI_ANALYZER_PROVIDER", "gemini")).strip().lower() or "gemini"
+    model = str(os.getenv("AI_ANALYZER_MODEL", "")).strip() or _default_model(provider)
+
+    response = {
+        "provider": provider,
+        "model": model,
+        "result": "failed",
+        "reason": "invalid_input",
+        "account_name": None,
+        "account_number": None,
+    }
+
+    text = str(page_text or "").strip()
+    if not text:
+        return response
+
+    heuristic_name, heuristic_number = _extract_identity_heuristic(text)
+
+    if provider != "gemini":
+        response["reason"] = "unsupported_provider"
+        response["result"] = "fallback_heuristic"
+        response["account_name"] = heuristic_name
+        response["account_number"] = heuristic_number
+        return response
+
+    prompt = (
+        "Extract account identity from this bank statement page text.\n"
+        "Return one JSON object only, no markdown, no explanations.\n"
+        "Required keys: account_name, account_number.\n"
+        "Rules:\n"
+        "- Use null when not confidently found.\n"
+        "- account_name should be the account holder name only.\n"
+        "- account_number should keep masking/dashes if present in source.\n"
+        f"Page text: {text[:9000]}\n"
+        "Output JSON now."
+    )
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "application/json",
+        },
+    }
+    parsed, reason = _call_gemini_json(payload, model)
+    if not parsed:
+        response["reason"] = reason or "invalid_llm_output"
+        response["result"] = "fallback_heuristic"
+        response["account_name"] = heuristic_name
+        response["account_number"] = heuristic_number
+        return response
+
+    name_raw = parsed.get("account_name")
+    number_raw = parsed.get("account_number")
+    name = str(name_raw).strip() if isinstance(name_raw, str) else None
+    number = str(number_raw).strip() if isinstance(number_raw, str) else None
+    if name and name.lower() in {"none", "null", "n/a", "na"}:
+        name = None
+    if number and number.lower() in {"none", "null", "n/a", "na"}:
+        number = None
+
+    response["account_name"] = name or heuristic_name
+    response["account_number"] = number or heuristic_number
+    if response["account_name"] or response["account_number"]:
+        response["result"] = "applied"
+        response["reason"] = "identity_extracted"
+    else:
+        response["result"] = "failed"
+        response["reason"] = "identity_not_found"
+    return response
+
+
+def _extract_identity_heuristic(text: str) -> Tuple[Optional[str], Optional[str]]:
+    # Preserve line boundaries for labeled values and also keep a compact copy for split labels.
+    clean_lines = []
+    for line in str(text or "").splitlines():
+        compact = re.sub(r"\s+", " ", line).strip()
+        if compact:
+            clean_lines.append(compact)
+    clean = "\n".join(clean_lines)
+    compact_all = re.sub(r"\s+", " ", clean).strip()
+
+    name_patterns = [
+        r"(?:account\s*name|account\s*holder|depositor\s*name|customer\s*name)\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9 .,'/&()-]{2,120})",
+        r"(?:name)\s*[:\-]\s*([A-Za-z0-9][A-Za-z0-9 .,'/&()-]{2,120})",
+    ]
+    number_patterns = [
+        r"(?:account\s*(?:no\.?|number|#)|acct\.?\s*(?:no\.?|#)|casa\s*(?:no\.?|#)|a\/c\s*(?:no\.?|#))\s*[:\-]?\s*([0-9Xx\*\- ]{6,50})",
+    ]
+
+    name = _extract_first_match(name_patterns, clean) or _extract_first_match(name_patterns, compact_all)
+    if not name:
+        name = _extract_name_from_header(clean_lines, compact_all)
+    number = _extract_first_match(number_patterns, clean) or _extract_first_match(number_patterns, compact_all)
+
+    name = _normalize_name_candidate(name)
+    number = _normalize_number_candidate(number) or _find_account_number_in_lines(clean_lines)
+    return name, number
+
+
+def _extract_first_match(patterns: List[str], text: str) -> Optional[str]:
+    for pattern in patterns:
+        try:
+            match = re.search(pattern, text, flags=re.IGNORECASE | re.MULTILINE)
+        except re.error:
+            continue
+        if not match:
+            continue
+        value = str(match.group(1) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _normalize_name_candidate(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    cleaned = re.sub(r"\s+", " ", value).strip(" -:|")
+    stop_words = [
+        "account number",
+        "acct no",
+        "available balance",
+        "statement period",
+        "date from",
+        "date to",
+    ]
+    low = cleaned.lower()
+    for token in stop_words:
+        idx = low.find(token)
+        if idx > 0:
+            cleaned = cleaned[:idx].strip(" -:|")
+            low = cleaned.lower()
+    if len(cleaned) < 3 or len(cleaned) > 120:
+        return None
+    if cleaned.lower() in {"none", "null", "n/a", "na"}:
+        return None
+    return cleaned
+
+
+def _normalize_number_candidate(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    cleaned = re.sub(r"\s+", "", value).replace("—", "-").strip(" -:|")
+    cleaned = cleaned.replace("*", "X")
+    if len(cleaned) < 4:
+        return None
+    # Allow masked account numbers (e.g. XXXXX1234 / XXXXXXXX) even without plain digits.
+    if not re.search(r"[0-9Xx]", cleaned):
+        return None
+    return cleaned
+
+
+def _find_account_number_in_lines(lines: List[str]) -> Optional[str]:
+    for idx, line in enumerate(lines):
+        low = line.lower()
+        if not any(token in low for token in ("account", "acct", "a/c", "casa")):
+            continue
+        candidates = re.findall(r"[0-9Xx\*\-]{6,50}", line)
+        if not candidates and idx + 1 < len(lines):
+            candidates = re.findall(r"[0-9Xx\*\-]{6,50}", lines[idx + 1])
+        for cand in candidates:
+            normalized = _normalize_number_candidate(cand)
+            if normalized:
+                return normalized
+    return None
+
+
+def _extract_name_from_header(lines: List[str], compact_all: str) -> Optional[str]:
+    header = ""
+    if lines:
+        header = lines[0]
+    if not header:
+        header = compact_all[:260]
+    if not header:
+        return None
+
+    normalized = re.sub(r"\s+", " ", header).strip()
+    # Trim obvious table/header markers.
+    for token in [
+        " TRANSACTION DESCRIPTION",
+        " DATE CHECK NO.",
+        " DATE ",
+        " ACCOUNT NO",
+        " ACCOUNT NUMBER",
+    ]:
+        idx = normalized.upper().find(token)
+        if idx > 0:
+            normalized = normalized[:idx].strip()
+
+    # Trim common address starts that usually come right after company/person name.
+    for marker in [
+        " LOT ",
+        " BLOCK ",
+        " STREET ",
+        " ST. ",
+        " AVE ",
+        " AVENUE ",
+        " BARANGAY ",
+        " BRGY ",
+        " CITY ",
+        " QUEZON CITY ",
+        " MAKATI ",
+        " MANILA ",
+    ]:
+        idx = normalized.upper().find(marker)
+        if idx > 0:
+            normalized = normalized[:idx].strip()
+            break
+
+    # Prefer legal entity endings if present.
+    m = re.search(
+        r"\b([A-Z][A-Z0-9 .,&'/-]{2,120}\b(?:CORPORATION|CORP\.?|INC\.?|CO\.?|COMPANY|LIMITED|LTD\.?))\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        normalized = m.group(1).strip()
+
+    return _normalize_name_candidate(normalized)
+
+
 def analyze_unknown_bank_and_apply(
     layout_pages: List[Dict],
     sample_pages: int,
@@ -115,11 +337,6 @@ def _generate_profile_with_gemini(
     snippets: List[Dict],
     model: str,
 ) -> Tuple[Optional[Dict], Optional[str]]:
-    api_key = str(os.getenv("GEMINI_API_KEY", "")).strip()
-    if not api_key:
-        return None, "missing_api_key"
-    timeout = int(os.getenv("AI_ANALYZER_TIMEOUT_SEC", "20"))
-
     prompt = (
         "Generate a strict bank statement parsing profile from snippet text.\n"
         "Return one JSON object only, no markdown, no explanations.\n"
@@ -148,6 +365,15 @@ def _generate_profile_with_gemini(
             "responseMimeType": "application/json",
         },
     }
+    return _call_gemini_json(payload, model)
+
+
+def _call_gemini_json(payload: Dict, model: str) -> Tuple[Optional[Dict], Optional[str]]:
+    api_key = str(os.getenv("GEMINI_API_KEY", "")).strip()
+    if not api_key:
+        return None, "missing_api_key"
+    timeout = int(os.getenv("AI_ANALYZER_TIMEOUT_SEC", "20"))
+
     body = json.dumps(payload).encode("utf-8")
     encoded_model = urllib.parse.quote(model, safe="")
     encoded_key = urllib.parse.quote(api_key, safe="")
@@ -223,6 +449,8 @@ def _validate_proposal(
     contains_all = _normalize_items(proposal.get("detection_contains_all", []))
     if not contains_any and not contains_all:
         return None, None, "empty_detection_rule"
+    if not _is_bank_like_profile(str(proposal.get("profile_name") or ""), contains_any, contains_all):
+        return None, None, "profile_not_bank_like"
 
     date_order = [v for v in _normalize_items(proposal.get("date_order", [])) if v in {"mdy", "dmy", "ymd"}]
     if not date_order:
@@ -382,6 +610,29 @@ def _sanitize_profile_name(raw: str) -> str:
     return cleaned[:64]
 
 
+def _is_bank_like_profile(raw_name: str, contains_any: List[str], contains_all: List[str]) -> bool:
+    pool = " ".join([str(raw_name or ""), *contains_any, *contains_all]).lower()
+    bank_markers = (
+        "bank",
+        "unibank",
+        "aub",
+        "bdo",
+        "bpi",
+        "rcbc",
+        "eastwest",
+        "ewb",
+        "unionbank",
+        "chinabank",
+        "maybank",
+        "security bank",
+        "metrobank",
+        "ps bank",
+        "pbcom",
+        "sterling",
+    )
+    return any(marker in pool for marker in bank_markers)
+
+
 def _normalize_items(values) -> List[str]:
     if not isinstance(values, list):
         return []
@@ -404,6 +655,17 @@ def _pick_patterns(values, fallback: List[str]) -> List[str]:
     picked = []
     for item in values:
         text = str(item).strip()
-        if text:
-            picked.append(text)
+        if not text:
+            continue
+        try:
+            compiled = re.compile(text, flags=re.IGNORECASE | re.MULTILINE)
+        except re.error:
+            continue
+        if compiled.groups < 1:
+            text = f"({text})"
+            try:
+                re.compile(text, flags=re.IGNORECASE | re.MULTILINE)
+            except re.error:
+                continue
+        picked.append(text)
     return picked if picked else list(fallback)
