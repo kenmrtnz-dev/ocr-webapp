@@ -1,0 +1,409 @@
+import fcntl
+import json
+import os
+import re
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Dict, List, Optional, Tuple
+
+from app.bank_profiles import (
+    BankProfile,
+    DetectionRule,
+    DETECTION_RULES,
+    PROFILES,
+    get_profiles_config_path,
+    reload_profiles,
+)
+from app.statement_parser import is_transaction_row, parse_words_page
+
+
+def analyze_unknown_bank_and_apply(
+    layout_pages: List[Dict],
+    sample_pages: int,
+    min_rows: int,
+    min_date_ratio: float,
+    min_balance_ratio: float,
+) -> Dict:
+    provider = str(os.getenv("AI_ANALYZER_PROVIDER", "gemini")).strip().lower() or "gemini"
+    model = str(os.getenv("AI_ANALYZER_MODEL", "")).strip() or _default_model(provider)
+    response = {
+        "triggered": True,
+        "result": "failed",
+        "reason": "analyzer_error",
+        "provider": provider,
+        "model": model,
+        "profile_name": None,
+    }
+
+    snippets = _build_snippets(layout_pages, sample_pages)
+    if not snippets:
+        response["result"] = "skipped"
+        response["reason"] = "no_text_snippets"
+        return response
+
+    proposal, proposal_reason = _generate_profile_with_llm(snippets, provider, model)
+    if not proposal:
+        response["result"] = "failed"
+        response["reason"] = proposal_reason or "invalid_llm_output"
+        return response
+
+    candidate, rule, validation_reason = _validate_proposal(
+        proposal=proposal,
+        layout_pages=layout_pages,
+        sample_pages=sample_pages,
+        min_rows=min_rows,
+        min_date_ratio=min_date_ratio,
+        min_balance_ratio=min_balance_ratio,
+    )
+    if not candidate or not rule:
+        response["result"] = "rejected"
+        response["reason"] = (
+            f"validation_failed_{validation_reason}" if validation_reason else "validation_failed"
+        )
+        return response
+
+    response["profile_name"] = candidate.name
+
+    applied, apply_reason = _apply_profile_update_atomic(candidate, rule)
+    if not applied:
+        response["result"] = "failed"
+        response["reason"] = f"apply_failed_{apply_reason}" if apply_reason else "apply_failed"
+        return response
+
+    reload_profiles()
+    response["result"] = "applied"
+    response["reason"] = "profile_created"
+    return response
+
+
+def _build_snippets(layout_pages: List[Dict], sample_pages: int) -> List[Dict]:
+    snippets: List[Dict] = []
+    for idx, layout in enumerate(layout_pages, start=1):
+        text = str((layout or {}).get("text") or "").strip()
+        if not text:
+            continue
+        snippets.append(
+            {
+                "page": idx,
+                "text": text[:7000],
+            }
+        )
+        if len(snippets) >= max(1, sample_pages):
+            break
+    return snippets
+
+
+def _default_model(provider: str) -> str:
+    if provider == "gemini":
+        return "gemini-2.5-flash"
+    return "gemini-2.5-flash"
+
+
+def _generate_profile_with_llm(
+    snippets: List[Dict],
+    provider: str,
+    model: str,
+) -> Tuple[Optional[Dict], Optional[str]]:
+    if provider == "gemini":
+        return _generate_profile_with_gemini(snippets, model)
+    return None, "unsupported_provider"
+
+
+def _generate_profile_with_gemini(
+    snippets: List[Dict],
+    model: str,
+) -> Tuple[Optional[Dict], Optional[str]]:
+    api_key = str(os.getenv("GEMINI_API_KEY", "")).strip()
+    if not api_key:
+        return None, "missing_api_key"
+    timeout = int(os.getenv("AI_ANALYZER_TIMEOUT_SEC", "20"))
+
+    prompt = (
+        "Generate a strict bank statement parsing profile from snippet text.\n"
+        "Return one JSON object only, no markdown, no explanations.\n"
+        "Required keys:\n"
+        "profile_name, detection_contains_any, detection_contains_all, date_tokens, description_tokens, "
+        "debit_tokens, credit_tokens, balance_tokens, date_order, noise_tokens, "
+        "account_name_patterns, account_number_patterns.\n"
+        "Rules:\n"
+        "- date_order values must be from [mdy, dmy, ymd].\n"
+        "- all array values must be strings.\n"
+        "- detection_contains_any and detection_contains_all cannot both be empty.\n"
+        "- profile_name should be short and bank-specific.\n"
+        "Example shape:\n"
+        "{\"profile_name\":\"AUTO_EXAMPLE\",\"detection_contains_any\":[\"example bank\"],\"detection_contains_all\":[],"
+        "\"date_tokens\":[\"date\"],\"description_tokens\":[\"description\"],\"debit_tokens\":[\"debit\"],"
+        "\"credit_tokens\":[\"credit\"],\"balance_tokens\":[\"balance\"],\"date_order\":[\"mdy\"],"
+        "\"noise_tokens\":[],\"account_name_patterns\":[],\"account_number_patterns\":[]}\n"
+        f"Statement snippets: {json.dumps(snippets, ensure_ascii=True)}\n"
+        "Output JSON now."
+    )
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "application/json",
+        },
+    }
+    body = json.dumps(payload).encode("utf-8")
+    encoded_model = urllib.parse.quote(model, safe="")
+    encoded_key = urllib.parse.quote(api_key, safe="")
+    req = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{encoded_model}:generateContent?key={encoded_key}",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            raw = res.read().decode("utf-8", errors="ignore")
+    except urllib.error.HTTPError as exc:
+        return None, f"http_error_{exc.code}"
+    except TimeoutError:
+        return None, "timeout"
+    except (urllib.error.URLError, ValueError):
+        return None, "http_error_network"
+
+    try:
+        parsed = json.loads(raw)
+        candidates = parsed.get("candidates", [])
+    except Exception:
+        return None, "invalid_llm_output"
+
+    content_parts: List[str] = []
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            parts = (((candidate or {}).get("content") or {}).get("parts") or [])
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                text = str((part or {}).get("text") or "").strip()
+                if text:
+                    content_parts.append(text)
+
+    content = "\n".join(content_parts).strip()
+    if not content:
+        return None, "invalid_llm_output"
+
+    try:
+        return json.loads(content), None
+    except Exception:
+        match = re.search(r"\{.*\}", content, flags=re.DOTALL)
+        if not match:
+            return None, "invalid_llm_output"
+        try:
+            return json.loads(match.group(0)), None
+        except Exception:
+            return None, "invalid_llm_output"
+
+
+def _validate_proposal(
+    proposal: Dict,
+    layout_pages: List[Dict],
+    sample_pages: int,
+    min_rows: int,
+    min_date_ratio: float,
+    min_balance_ratio: float,
+) -> Tuple[Optional[BankProfile], Optional[DetectionRule], Optional[str]]:
+    generic = PROFILES.get("GENERIC")
+    if not generic:
+        return None, None, "missing_generic_profile"
+
+    name = _sanitize_profile_name(str(proposal.get("profile_name") or ""))
+    if not name:
+        return None, None, "invalid_profile_name"
+    if name in PROFILES:
+        return None, None, "profile_already_exists"
+
+    contains_any = _normalize_items(proposal.get("detection_contains_any", []))
+    contains_all = _normalize_items(proposal.get("detection_contains_all", []))
+    if not contains_any and not contains_all:
+        return None, None, "empty_detection_rule"
+
+    date_order = [v for v in _normalize_items(proposal.get("date_order", [])) if v in {"mdy", "dmy", "ymd"}]
+    if not date_order:
+        date_order = list(generic.date_order)
+
+    candidate = BankProfile(
+        name=name,
+        date_tokens=_pick_tokens(proposal.get("date_tokens", []), generic.date_tokens),
+        description_tokens=_pick_tokens(proposal.get("description_tokens", []), generic.description_tokens),
+        debit_tokens=_pick_tokens(proposal.get("debit_tokens", []), generic.debit_tokens),
+        credit_tokens=_pick_tokens(proposal.get("credit_tokens", []), generic.credit_tokens),
+        balance_tokens=_pick_tokens(proposal.get("balance_tokens", []), generic.balance_tokens),
+        date_order=date_order,
+        noise_tokens=_normalize_items(proposal.get("noise_tokens", [])),
+        ocr_backends=list(generic.ocr_backends),
+        account_name_patterns=_pick_patterns(
+            proposal.get("account_name_patterns", []),
+            generic.account_name_patterns,
+        ),
+        account_number_patterns=_pick_patterns(
+            proposal.get("account_number_patterns", []),
+            generic.account_number_patterns,
+        ),
+    )
+
+    for rule in DETECTION_RULES:
+        if rule.contains_any == contains_any and rule.contains_all == contains_all:
+            return None, None, "duplicate_detection_rule"
+    detection_rule = DetectionRule(profile=name, contains_any=contains_any, contains_all=contains_all)
+
+    ok, reason = _validate_parse_quality(
+        candidate,
+        layout_pages,
+        sample_pages,
+        min_rows,
+        min_date_ratio,
+        min_balance_ratio,
+    )
+    if not ok:
+        return None, None, reason
+
+    return candidate, detection_rule, None
+
+
+def _validate_parse_quality(
+    profile: BankProfile,
+    layout_pages: List[Dict],
+    sample_pages: int,
+    min_rows: int,
+    min_date_ratio: float,
+    min_balance_ratio: float,
+) -> Tuple[bool, str]:
+    checked_pages = 0
+    total_rows = 0
+    valid_dates = 0
+    valid_balances = 0
+
+    for layout in layout_pages:
+        words = layout.get("words", []) if isinstance(layout, dict) else []
+        if not words:
+            continue
+        w = float(layout.get("width", 1) if isinstance(layout, dict) else 1)
+        h = float(layout.get("height", 1) if isinstance(layout, dict) else 1)
+        rows, _, _ = parse_words_page(words, w, h, profile)
+        tx_rows = [row for row in rows if is_transaction_row(row, profile)]
+        if not tx_rows:
+            checked_pages += 1
+            if checked_pages >= max(1, sample_pages):
+                break
+            continue
+        total_rows += len(tx_rows)
+        valid_dates += sum(1 for r in tx_rows if str(r.get("date") or "").strip())
+        valid_balances += sum(1 for r in tx_rows if str(r.get("balance") or "").strip())
+        checked_pages += 1
+        if checked_pages >= max(1, sample_pages):
+            break
+
+    if total_rows < max(1, min_rows):
+        return False, "quality_rows_below_threshold"
+
+    date_ratio = valid_dates / total_rows if total_rows else 0.0
+    if date_ratio < min_date_ratio:
+        return False, "quality_date_ratio_below_threshold"
+
+    balance_ratio = valid_balances / total_rows if total_rows else 0.0
+    if balance_ratio < min_balance_ratio:
+        return False, "quality_balance_ratio_below_threshold"
+
+    return True, "quality_ok"
+
+
+def _apply_profile_update_atomic(profile: BankProfile, rule: DetectionRule) -> Tuple[bool, str]:
+    path = get_profiles_config_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return False, "config_parent_unwritable"
+
+    if not path.exists():
+        return False, "config_missing"
+
+    try:
+        with open(path, "r+") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                raw = json.load(f)
+            except Exception:
+                return False, "config_invalid_json"
+
+            profiles = raw.get("profiles", {})
+            rules = raw.get("detection_rules", [])
+            if profile.name in profiles:
+                return False, "profile_already_exists"
+
+            profiles[profile.name] = {
+                "date_tokens": list(profile.date_tokens),
+                "description_tokens": list(profile.description_tokens),
+                "debit_tokens": list(profile.debit_tokens),
+                "credit_tokens": list(profile.credit_tokens),
+                "balance_tokens": list(profile.balance_tokens),
+                "date_order": list(profile.date_order),
+                "noise_tokens": list(profile.noise_tokens),
+                "ocr_backends": list(profile.ocr_backends),
+                "account_name_patterns": list(profile.account_name_patterns),
+                "account_number_patterns": list(profile.account_number_patterns),
+            }
+            rules.append(
+                {
+                    "profile": rule.profile,
+                    "contains_any": list(rule.contains_any),
+                    "contains_all": list(rule.contains_all),
+                }
+            )
+            raw["profiles"] = profiles
+            raw["detection_rules"] = rules
+
+            with tempfile.NamedTemporaryFile(
+                "w",
+                dir=str(path.parent),
+                delete=False,
+            ) as tmp:
+                json.dump(raw, tmp, indent=2)
+                tmp_path = tmp.name
+            os.replace(tmp_path, path)
+    except Exception:
+        return False, "config_write_failed"
+
+    return True, "applied"
+
+
+def _sanitize_profile_name(raw: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", (raw or "").strip()).strip("_").upper()
+    if not cleaned:
+        return ""
+    if not cleaned.startswith("AUTO_"):
+        cleaned = f"AUTO_{cleaned}"
+    return cleaned[:64]
+
+
+def _normalize_items(values) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    out = []
+    for item in values:
+        text = str(item).strip().lower()
+        if text:
+            out.append(text)
+    return out
+
+
+def _pick_tokens(values, fallback: List[str]) -> List[str]:
+    picked = _normalize_items(values)
+    return picked if picked else list(fallback)
+
+
+def _pick_patterns(values, fallback: List[str]) -> List[str]:
+    if not isinstance(values, list):
+        return list(fallback)
+    picked = []
+    for item in values:
+        text = str(item).strip()
+        if text:
+            picked.append(text)
+    return picked if picked else list(fallback)

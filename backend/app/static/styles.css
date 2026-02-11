@@ -339,6 +339,35 @@ h3 {
     font-family: 'Manrope', sans-serif;
 }
 
+.progress-analyzer {
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-family: 'Manrope', sans-serif;
+}
+
+.progress-analyzer-row {
+    margin-top: 6px;
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    align-items: center;
+    color: var(--muted);
+    font-size: 0.72rem;
+}
+
+.progress-analyzer-item {
+    font-family: 'Manrope', sans-serif;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.is-hidden {
+    display: none !important;
+}
+
 .summary-card {
     background: #ffffff;
     border: 1px solid var(--line-soft);

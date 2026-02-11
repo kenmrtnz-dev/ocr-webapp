@@ -8,10 +8,11 @@ from celery import Celery
 from pdf2image import convert_from_path, pdfinfo_from_path
 from PIL import Image
 
-from app.bank_profiles import detect_bank_profile, extract_account_identity, find_value_bounds
+from app.bank_profiles import detect_bank_profile, extract_account_identity, find_value_bounds, reload_profiles
 from app.image_cleaner import clean_page
 from app.ocr_engine import ocr_image
 from app.pdf_text_extract import extract_pdf_layout_pages
+from app.profile_analyzer import analyze_unknown_bank_and_apply
 from app.statement_parser import parse_page_with_profile_fallback, is_transaction_row
 
 
@@ -20,6 +21,13 @@ PREVIEW_DPI = int(os.getenv("PREVIEW_DPI", "130"))
 PREVIEW_DRAFT_DPI = int(os.getenv("PREVIEW_DRAFT_DPI", "100"))
 PREVIEW_MAX_PIXELS = int(os.getenv("PREVIEW_MAX_PIXELS", "6000000"))
 OCR_BACKEND = "easyocr"
+AI_ANALYZER_ENABLED = str(os.getenv("AI_ANALYZER_ENABLED", "true")).strip().lower() not in {"0", "false", "no"}
+AI_ANALYZER_PROVIDER = str(os.getenv("AI_ANALYZER_PROVIDER", "gemini")).strip().lower() or "gemini"
+AI_ANALYZER_MODEL = str(os.getenv("AI_ANALYZER_MODEL", "gemini-2.5-flash")).strip() or "gemini-2.5-flash"
+AI_ANALYZER_SAMPLE_PAGES = int(os.getenv("AI_ANALYZER_SAMPLE_PAGES", "3"))
+AI_ANALYZER_MIN_ROWS = int(os.getenv("AI_ANALYZER_MIN_ROWS", "3"))
+AI_ANALYZER_MIN_DATE_RATIO = float(os.getenv("AI_ANALYZER_MIN_DATE_RATIO", "0.80"))
+AI_ANALYZER_MIN_BAL_RATIO = float(os.getenv("AI_ANALYZER_MIN_BAL_RATIO", "0.80"))
 
 celery = Celery(
     "ocr_worker",
@@ -111,6 +119,7 @@ def prepare_draft(job_id: str):
 def process_pdf(job_id: str, parse_mode: str = "text"):
     print(f"[WORKER] Starting job {job_id}")
     parse_mode = _normalize_parse_mode(parse_mode)
+    reload_profiles()
 
     job_dir = os.path.join(DATA_DIR, "jobs", job_id)
     input_pdf = os.path.join(job_dir, "input", "document.pdf")
@@ -129,11 +138,15 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
 
     last_progress = 0
 
+    status_meta: Dict[str, object] = {"parse_mode": parse_mode}
+
     def report(status: str, step: str, progress: int, **extra):
         nonlocal last_progress
         safe_progress = max(last_progress, min(100, int(progress)))
         last_progress = safe_progress
-        update_status(job_dir, status, step=step, progress=safe_progress, parse_mode=parse_mode, **extra)
+        payload = dict(status_meta)
+        payload.update(extra)
+        update_status(job_dir, status, step=step, progress=safe_progress, **payload)
 
     try:
         parsed_output: Dict[str, List[Dict]] = {}
@@ -194,6 +207,49 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
                 page_files = [f"page_{i:03}.png" for i in range(1, max(total_pages, 0) + 1)]
             report("processing", "text_extraction", 45, pages=len(page_files), ocr_backend=OCR_BACKEND)
 
+        analyzer_meta = {
+            "triggered": False,
+            "result": "skipped",
+            "reason": "disabled",
+            "provider": AI_ANALYZER_PROVIDER,
+            "model": AI_ANALYZER_MODEL,
+            "profile_name": None,
+        }
+        if AI_ANALYZER_ENABLED:
+            sample_profiles = _sample_detected_profiles(layout_pages, AI_ANALYZER_SAMPLE_PAGES)
+            if sample_profiles and all(name == "GENERIC" for name in sample_profiles):
+                report("processing", "profile_analyzer", 45, ocr_backend=OCR_BACKEND)
+                analyzer_meta = analyze_unknown_bank_and_apply(
+                    layout_pages=layout_pages,
+                    sample_pages=AI_ANALYZER_SAMPLE_PAGES,
+                    min_rows=AI_ANALYZER_MIN_ROWS,
+                    min_date_ratio=AI_ANALYZER_MIN_DATE_RATIO,
+                    min_balance_ratio=AI_ANALYZER_MIN_BAL_RATIO,
+                )
+            elif not sample_profiles:
+                analyzer_meta = {
+                    **analyzer_meta,
+                    "reason": "no_text_profiles_sampled",
+                }
+            else:
+                analyzer_meta = {
+                    **analyzer_meta,
+                    "reason": "matched_existing_profile",
+                }
+        status_meta.update(
+            {
+                "profile_analyzer_triggered": bool(analyzer_meta.get("triggered", False)),
+                "profile_analyzer_provider": analyzer_meta.get("provider"),
+                "profile_analyzer_model": analyzer_meta.get("model"),
+                "profile_analyzer_result": analyzer_meta.get("result"),
+                "profile_analyzer_reason": analyzer_meta.get("reason"),
+                "profile_selected_after_analyzer": analyzer_meta.get("profile_name"),
+            }
+        )
+        if analyzer_meta.get("triggered"):
+            with open(os.path.join(result_dir, "profile_update.json"), "w") as f:
+                json.dump(analyzer_meta, f, indent=2)
+
         account_name = None
         account_number = None
         account_name_bbox = None
@@ -221,6 +277,12 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
                 "account_number": account_number,
                 "account_name_bbox": account_name_bbox,
                 "account_number_bbox": account_number_bbox,
+                "profile_analyzer_triggered": bool(analyzer_meta.get("triggered", False)),
+                "profile_analyzer_provider": analyzer_meta.get("provider"),
+                "profile_analyzer_model": analyzer_meta.get("model"),
+                "profile_analyzer_result": analyzer_meta.get("result"),
+                "profile_analyzer_reason": analyzer_meta.get("reason"),
+                "profile_selected_after_analyzer": analyzer_meta.get("profile_name"),
             },
             "pages": {},
         }
@@ -371,14 +433,15 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
         print(f"[WORKER] Finished job {job_id}")
         return {"pages": len(page_files)}
     except Exception as exc:
+        fail_payload = {"parse_mode": parse_mode, "ocr_backend": OCR_BACKEND}
+        fail_payload.update(status_meta)
         update_status(
             job_dir,
             "failed",
             step="failed",
             progress=last_progress,
             message=str(exc),
-            parse_mode=parse_mode,
-            ocr_backend=OCR_BACKEND,
+            **fail_payload,
         )
         print(f"[WORKER] Failed job {job_id}: {exc}")
         raise
@@ -430,6 +493,18 @@ def _read_preprocess_config(job_dir: str) -> Dict:
             return json.load(f)
     except Exception:
         return {}
+
+
+def _sample_detected_profiles(layout_pages: List[Dict], max_pages: int) -> List[str]:
+    names: List[str] = []
+    for layout in layout_pages:
+        text = str((layout or {}).get("text") or "").strip()
+        if not text:
+            continue
+        names.append(detect_bank_profile(text).name)
+        if len(names) >= max(1, max_pages):
+            break
+    return names
 
 
 def _render_pdf_pages(
