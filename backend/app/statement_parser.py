@@ -70,6 +70,9 @@ def normalize_amount(value: str) -> Optional[str]:
     text = (value or "").strip()
     if not text:
         return None
+    # Do not treat date-like tokens as monetary amounts.
+    if re.search(r"\b\d{1,4}[/-]\d{1,2}[/-]\d{1,4}\b", text):
+        return None
     text = text.replace("₱", "").replace("PHP", "").replace("php", "")
     text = text.replace("—", "").replace("–", "").replace("-", "-")
     text = text.strip()
@@ -296,6 +299,10 @@ def parse_words_page(
         if not (date_iso and balance):
             continue
 
+        if _is_opening_balance_line(line_text):
+            debit = None
+            credit = None
+
         row_id = f"{len(rows) + 1:03}"
         rows.append({
             "row_id": row_id,
@@ -419,6 +426,47 @@ def evaluate_quality(rows: List[Dict]) -> Dict:
     }
 
 
+def is_transaction_row(row: Dict, profile: BankProfile) -> bool:
+    if not row.get("date") or not row.get("balance"):
+        return False
+
+    description = str(row.get("description") or "").strip()
+    lower_desc = description.lower()
+
+    if description and _is_opening_balance_line(description):
+        return False
+
+    if not row.get("debit") and not row.get("credit"):
+        return False
+
+    if lower_desc:
+        header_tokens = set(
+            profile.date_tokens
+            + profile.description_tokens
+            + profile.debit_tokens
+            + profile.credit_tokens
+            + profile.balance_tokens
+        )
+        header_hits = sum(1 for token in header_tokens if token and token in lower_desc)
+        if header_hits >= 2:
+            return False
+
+    return True
+
+
+def should_fallback_to_ocr(
+    text_word_count: int,
+    rows: List[Dict],
+    diagnostics: Dict,
+) -> Tuple[bool, Optional[str]]:
+    if text_word_count <= 0:
+        return True, "no_text_layer"
+
+    # Text-first speed mode: any text layer keeps the page in text parsing.
+    # OCR is reserved only for pages without extractable text.
+    return False, None
+
+
 def _rows_conversion_ratio(rows: List[Dict], diagnostics: Dict) -> float:
     row_candidates = int(diagnostics.get("row_candidates") or 0)
     if row_candidates <= 0:
@@ -537,6 +585,8 @@ def _assign_amount_columns(
 ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     amount_words = []
     for w in words:
+        if _is_date_like_token(w.get("text", "")):
+            continue
         norm = normalize_amount(w["text"])
         if norm is None:
             continue
@@ -569,6 +619,13 @@ def _assign_amount_columns(
     debit = remaining[d_idx]["value"]
     credit = remaining[c_idx]["value"]
     return debit, credit, balance
+
+
+def _is_date_like_token(token: str) -> bool:
+    text = (token or "").strip()
+    if not text:
+        return False
+    return bool(re.search(r"\b\d{1,4}[/-]\d{1,2}[/-]\d{1,4}\b", text))
 
 
 def _extract_description_from_header_line(
@@ -744,11 +801,16 @@ def _parse_rows_without_header(
             else:
                 debit = flow
 
+        combined_text = " ".join(w["text"] for w in line_words)
+        if _is_opening_balance_line(combined_text):
+            debit = None
+            credit = None
+
         row_id = f"{len(rows) + 1:03}"
         rows.append({
             "row_id": row_id,
             "date": date_iso,
-            "description": _extract_description_from_words(line_words, profile) or _extract_description_without_header(" ".join(w["text"] for w in line_words), profile),
+            "description": _extract_description_from_words(line_words, profile) or _extract_description_without_header(combined_text, profile),
             "debit": debit,
             "credit": credit,
             "balance": balance,
@@ -779,6 +841,23 @@ def _is_noise(line_text: str, profile: BankProfile) -> bool:
         if token in lower:
             return True
     return False
+
+
+def _is_opening_balance_line(text: str) -> bool:
+    lower = (text or "").lower()
+    if not lower.strip():
+        return False
+    return any(
+        token in lower
+        for token in [
+            "beginning balance",
+            "opening balance",
+            "begin balance",
+            "balance brought forward",
+            "brought forward",
+            "balance forward",
+        ]
+    )
 
 
 def _clamp01(v: float) -> float:

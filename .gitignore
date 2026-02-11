@@ -1,0 +1,11 @@
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Local sample documents
+samples/
+
+# Python cache artifacts
+__pycache__/
+*.pyc

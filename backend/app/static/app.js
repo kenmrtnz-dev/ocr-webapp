@@ -19,6 +19,8 @@ const totalTransactions = document.getElementById('totalTransactions');
 const totalDebitTransactions = document.getElementById('totalDebitTransactions');
 const totalCreditTransactions = document.getElementById('totalCreditTransactions');
 const endingBalance = document.getElementById('endingBalance');
+const accountNameSummary = document.getElementById('accountNameSummary');
+const accountNumberSummary = document.getElementById('accountNumberSummary');
 const previewImage = document.getElementById('previewImage');
 const previewCanvas = document.getElementById('previewCanvas');
 const prevPageBtn = document.getElementById('prevPageBtn');
@@ -26,11 +28,16 @@ const nextPageBtn = document.getElementById('nextPageBtn');
 const flattenModeBtn = document.getElementById('flattenModeBtn');
 const applyFlattenBtn = document.getElementById('applyFlattenBtn');
 const resetFlattenBtn = document.getElementById('resetFlattenBtn');
+const resetViewBtn = document.getElementById('resetViewBtn');
+const zoomOutBtn = document.getElementById('zoomOutBtn');
+const zoomInBtn = document.getElementById('zoomInBtn');
 const pageIndicator = document.getElementById('pageIndicator');
 const pageSelect = document.getElementById('pageSelect');
 const previewWrap = document.querySelector('.preview-canvas-wrap');
-const previewMagnifier = document.getElementById('previewMagnifier');
+const zoomLevel = document.getElementById('zoomLevel');
 const resultsSection = document.querySelector('.results-section');
+const ocrToggle = document.getElementById('ocrToggle');
+const modeToggleText = document.getElementById('modeToggleText');
 
 let selectedFile = null;
 let currentJobId = null;
@@ -39,6 +46,7 @@ let parsedRows = [];
 let rowsByPage = {};
 let boundsByPage = {};
 let pageRowToGlobal = {};
+let identityBoundsByPage = {};
 let currentPageIndex = 0;
 let activeRowKey = null;
 let shouldAutoScrollToResults = false;
@@ -52,14 +60,43 @@ let pageImageVersion = {};
 let elapsedStartMs = 0;
 let elapsedTimer = null;
 let previewOverlayDataUrl = '';
-const MAGNIFIER_ZOOM = 2.2;
+const PREVIEW_ZOOM_MIN = 1;
+const PREVIEW_ZOOM_MAX = 3.5;
+const PREVIEW_ZOOM_STEP = 0.12;
+let previewZoom = 1;
+let previewPanX = 0;
+let previewPanY = 0;
+let isPreviewPanning = false;
+let panStartX = 0;
+let panStartY = 0;
+let panOriginX = 0;
+let panOriginY = 0;
+const prefetchedPreviewSrcs = new Set();
+
+function getSelectedParseMode() {
+  return ocrToggle && ocrToggle.checked ? 'ocr' : 'text';
+}
+
+function syncModeToggleText() {
+  if (!modeToggleText) return;
+  modeToggleText.textContent = getSelectedParseMode().toUpperCase();
+}
 
 browseButton.addEventListener('click', (e) => {
   e.stopPropagation();
   openFilePicker();
 });
 
-uploadArea.addEventListener('click', () => openFilePicker());
+if (ocrToggle) {
+  ocrToggle.addEventListener('click', (e) => e.stopPropagation());
+  ocrToggle.addEventListener('change', syncModeToggleText);
+  const toggleWrap = ocrToggle.closest('.mode-toggle');
+  if (toggleWrap) {
+    toggleWrap.addEventListener('click', (e) => e.stopPropagation());
+  }
+}
+
+syncModeToggleText();
 
 fileInput.addEventListener('change', () => {
   if (!fileInput.files || !fileInput.files[0]) return;
@@ -122,21 +159,7 @@ finishSave.addEventListener('click', () => {
 });
 
 downloadCSV.addEventListener('click', () => {
-  if (!parsedRows.length) {
-    alert('No extracted rows to export yet.');
-    return;
-  }
-
-  const csv = buildCsv(parsedRows);
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `ocr_result_${currentJobId || 'job'}.csv`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
+  // Export to PDF is intentionally not wired yet.
 });
 
 prevPageBtn.addEventListener('click', () => {
@@ -162,8 +185,8 @@ if (pageSelect) {
 
 previewImage.addEventListener('load', () => {
   previewImage.style.display = 'block';
+  resetPreviewTransform();
   drawBoundingBoxes();
-  hideMagnifier();
 });
 
 previewImage.addEventListener('error', () => {
@@ -174,7 +197,8 @@ window.addEventListener('resize', () => {
   if (pageList.length) {
     drawBoundingBoxes();
   }
-  hideMagnifier();
+  clampPreviewPan();
+  applyPreviewTransform();
 });
 
 document.addEventListener('click', (e) => {
@@ -185,11 +209,24 @@ document.addEventListener('click', (e) => {
 
 previewCanvas.addEventListener('click', (e) => {
   if (!flattenMode || flattenBusy) return;
-  if (!previewCanvas.width || !previewCanvas.height) return;
+  if (!previewImage.naturalWidth || !previewWrap) return;
 
-  const rect = previewCanvas.getBoundingClientRect();
-  const x = (e.clientX - rect.left) / rect.width;
-  const y = (e.clientY - rect.top) / rect.height;
+  const wrapRect = previewWrap.getBoundingClientRect();
+  const baseRect = getRenderedImageRect(previewImage);
+  const baseLeft = baseRect.left - wrapRect.left;
+  const baseTop = baseRect.top - wrapRect.top;
+  const baseW = baseRect.width;
+  const baseH = baseRect.height;
+  if (baseW <= 0 || baseH <= 0) return;
+
+  const localX = e.clientX - wrapRect.left;
+  const localY = e.clientY - wrapRect.top;
+  const cx = baseLeft + (baseW / 2) + previewPanX;
+  const cy = baseTop + (baseH / 2) + previewPanY;
+  const xOnBase = ((localX - cx) / previewZoom) + (baseW / 2);
+  const yOnBase = ((localY - cy) / previewZoom) + (baseH / 2);
+  const x = xOnBase / baseW;
+  const y = yOnBase / baseH;
   if (x < 0 || x > 1 || y < 0 || y > 1) return;
 
   if (flattenPoints.length >= 4) return;
@@ -200,85 +237,144 @@ previewCanvas.addEventListener('click', (e) => {
 
 if (previewWrap) {
   previewWrap.addEventListener('mousemove', (e) => {
-    updateMagnifier(e);
+    if (isPreviewPanning) {
+      const dx = e.clientX - panStartX;
+      const dy = e.clientY - panStartY;
+      previewPanX = panOriginX + dx;
+      previewPanY = panOriginY + dy;
+      clampPreviewPan();
+      applyPreviewTransform();
+      drawBoundingBoxes();
+      return;
+    }
   });
 
   previewWrap.addEventListener('mouseleave', () => {
-    hideMagnifier();
+    stopPreviewPan();
+  });
+
+  previewWrap.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (flattenMode || !pageList.length) return;
+    isPreviewPanning = true;
+    panStartX = e.clientX;
+    panStartY = e.clientY;
+    panOriginX = previewPanX;
+    panOriginY = previewPanY;
+    previewWrap.classList.add('panning');
+    e.preventDefault();
+  });
+
+  previewWrap.addEventListener('wheel', (e) => {
+    if (flattenMode || !pageList.length || !previewImage.naturalWidth) return;
+    e.preventDefault();
+    const direction = e.deltaY < 0 ? 1 : -1;
+    stepPreviewZoom(direction * PREVIEW_ZOOM_STEP);
+  }, { passive: false });
+}
+
+window.addEventListener('mouseup', () => {
+  stopPreviewPan();
+});
+
+if (resetViewBtn) {
+  resetViewBtn.addEventListener('click', () => {
+    resetPreviewTransform();
   });
 }
 
-flattenModeBtn.addEventListener('click', () => {
-  if (!pageList.length || flattenBusy) return;
-  flattenMode = !flattenMode;
-  flattenPoints = [];
-  updateFlattenButtons();
-  drawBoundingBoxes();
-});
+if (zoomInBtn) {
+  zoomInBtn.addEventListener('click', () => {
+    stepPreviewZoom(PREVIEW_ZOOM_STEP);
+  });
+}
 
-applyFlattenBtn.addEventListener('click', async () => {
-  if (!currentJobId || !pageList.length || flattenBusy) return;
-  if (flattenPoints.length !== 4) {
-    alert('Select exactly 4 corner points first.');
-    return;
-  }
-  try {
-    flattenBusy = true;
-    updateFlattenButtons();
-    const pageFile = pageList[currentPageIndex];
-    const pageKey = pageFile.replace('.png', '');
+if (zoomOutBtn) {
+  zoomOutBtn.addEventListener('click', () => {
+    stepPreviewZoom(-PREVIEW_ZOOM_STEP);
+  });
+}
 
-    const res = await fetch(`/jobs/${currentJobId}/pages/${pageKey}/flatten`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ points: flattenPoints }),
-    });
-    if (!res.ok) {
-      const err = await safeParseJson(res);
-      throw new Error((err && err.detail) || 'Flatten failed');
+if (flattenModeBtn) {
+  flattenModeBtn.addEventListener('click', () => {
+    if (!pageList.length || flattenBusy) return;
+    flattenMode = !flattenMode;
+    if (flattenMode) {
+      resetPreviewTransform();
     }
-
-    await refreshCurrentPageData(pageKey);
     flattenPoints = [];
-    flattenMode = false;
     updateFlattenButtons();
-    renderCurrentPage();
-  } catch (err) {
-    alert(err.message || 'Flatten failed');
-  } finally {
-    flattenBusy = false;
-    updateFlattenButtons();
-  }
-});
+    drawBoundingBoxes();
+  });
+}
 
-resetFlattenBtn.addEventListener('click', async () => {
-  if (!currentJobId || !pageList.length || flattenBusy) return;
-  try {
-    flattenBusy = true;
-    updateFlattenButtons();
-    const pageFile = pageList[currentPageIndex];
-    const pageKey = pageFile.replace('.png', '');
-
-    const res = await fetch(`/jobs/${currentJobId}/pages/${pageKey}/flatten/reset`, {
-      method: 'POST',
-    });
-    if (!res.ok) {
-      const err = await safeParseJson(res);
-      throw new Error((err && err.detail) || 'Reset failed');
+if (applyFlattenBtn) {
+  applyFlattenBtn.addEventListener('click', async () => {
+    if (!currentJobId || !pageList.length || flattenBusy) return;
+    if (flattenPoints.length !== 4) {
+      alert('Select exactly 4 corner points first.');
+      return;
     }
+    try {
+      flattenBusy = true;
+      updateFlattenButtons();
+      const pageFile = pageList[currentPageIndex];
+      const pageKey = pageFile.replace('.png', '');
 
-    await refreshCurrentPageData(pageKey);
-    flattenPoints = [];
-    flattenMode = false;
-    updateFlattenButtons();
-    renderCurrentPage();
-  } catch (err) {
-    alert(err.message || 'Reset failed');
-  } finally {
-    flattenBusy = false;
-    updateFlattenButtons();
-  }
-});
+      const res = await fetch(`/jobs/${currentJobId}/pages/${pageKey}/flatten`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ points: flattenPoints }),
+      });
+      if (!res.ok) {
+        const err = await safeParseJson(res);
+        throw new Error((err && err.detail) || 'Flatten failed');
+      }
+
+      await refreshCurrentPageData(pageKey);
+      flattenPoints = [];
+      flattenMode = false;
+      updateFlattenButtons();
+      renderCurrentPage();
+    } catch (err) {
+      alert(err.message || 'Flatten failed');
+    } finally {
+      flattenBusy = false;
+      updateFlattenButtons();
+    }
+  });
+}
+
+if (resetFlattenBtn) {
+  resetFlattenBtn.addEventListener('click', async () => {
+    if (!currentJobId || !pageList.length || flattenBusy) return;
+    try {
+      flattenBusy = true;
+      updateFlattenButtons();
+      const pageFile = pageList[currentPageIndex];
+      const pageKey = pageFile.replace('.png', '');
+
+      const res = await fetch(`/jobs/${currentJobId}/pages/${pageKey}/flatten/reset`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const err = await safeParseJson(res);
+        throw new Error((err && err.detail) || 'Reset failed');
+      }
+
+      await refreshCurrentPageData(pageKey);
+      flattenPoints = [];
+      flattenMode = false;
+      updateFlattenButtons();
+      renderCurrentPage();
+    } catch (err) {
+      alert(err.message || 'Reset failed');
+    } finally {
+      flattenBusy = false;
+      updateFlattenButtons();
+    }
+  });
+}
 
 function handleFileSelection(file) {
   if (!file.name.toLowerCase().endsWith('.pdf')) {
@@ -302,13 +398,14 @@ async function createDraftJob() {
   ocrStarted = false;
   finishSave.textContent = 'Start OCR';
   startElapsedTimer();
-  updateProgressUI(4, 'Uploading for pre-processing...', 'uploading');
+  updateProgressUI(4, 'Uploading file...', 'uploading');
 
   try {
     const formData = new FormData();
     formData.append('file', selectedFile);
+    formData.append('mode', getSelectedParseMode());
 
-    const res = await fetch('/jobs/draft', { method: 'POST', body: formData });
+    const res = await fetch('/jobs', { method: 'POST', body: formData });
     if (!res.ok) {
       const error = await safeParseJson(res);
       throw new Error((error && error.detail) || 'Failed to upload file');
@@ -316,9 +413,17 @@ async function createDraftJob() {
 
     const data = await res.json();
     currentJobId = data.job_id;
-    await pollDraftUntilReady();
+    ocrStarted = true;
+    shouldAutoScrollToResults = true;
+    hasSeenInFlightStatus = false;
+    finishSave.textContent = 'Running OCR...';
+    await pollJobUntilDone();
+    stopElapsedTimer();
+    finishSave.textContent = 'OCR Done';
   } catch (err) {
     stopElapsedTimer();
+    ocrStarted = false;
+    finishSave.textContent = 'Start OCR';
     updateProgressUI(0, err.message || 'Upload failed', 'failed');
     alert(err.message || 'Upload failed.');
   }
@@ -337,6 +442,7 @@ async function pollDraftUntilReady() {
     const step = status.step || status.status || 'draft_queued';
     const progress = Number.isFinite(status.progress) ? status.progress : inferProgress(status.status, step);
     const currentOcrModel = status.ocr_backend || null;
+    const currentMode = status.parse_mode || getSelectedParseMode();
 
     if (status.status === 'failed') {
       throw new Error(status.message || 'Draft preparation failed');
@@ -366,6 +472,7 @@ async function loadDraftPages() {
   pageList.forEach((fileName) => {
     pageImageVersion[fileName.replace('.png', '')] = 0;
   });
+  prefetchedPreviewSrcs.clear();
   renderRows([]);
   renderCurrentPage();
 }
@@ -407,12 +514,13 @@ async function pollJobUntilDone() {
     const step = status.step || status.status || 'processing';
     const progress = Number.isFinite(status.progress) ? status.progress : inferProgress(status.status, step);
     const currentOcrModel = status.ocr_backend || null;
+    const currentMode = status.parse_mode || getSelectedParseMode();
     if (status.status === 'queued' || status.status === 'processing') {
       hasSeenInFlightStatus = true;
     }
 
     if (status.status === 'done') {
-      updateProgressUI(100, 'Results ready', step, currentOcrModel);
+      updateProgressUI(100, 'Results ready', step, currentOcrModel, currentMode);
       await loadResults();
       if (shouldAutoScrollToResults && hasSeenInFlightStatus) {
         shouldAutoScrollToResults = false;
@@ -423,11 +531,11 @@ async function pollJobUntilDone() {
     }
 
     if (status.status === 'failed') {
-      updateProgressUI(progress, status.message || 'OCR job failed', step, currentOcrModel);
+      updateProgressUI(progress, status.message || 'OCR job failed', step, currentOcrModel, currentMode);
       throw new Error(status.message || 'OCR job failed');
     }
 
-    updateProgressUI(progress, stepToLabel(step), step, currentOcrModel);
+    updateProgressUI(progress, stepToLabel(step), step, currentOcrModel, currentMode);
     await sleep(1200);
   }
 }
@@ -442,11 +550,13 @@ async function loadResults() {
   rowsByPage = {};
   boundsByPage = {};
   pageRowToGlobal = {};
+  identityBoundsByPage = {};
   parsedRows = [];
   activeRowKey = null;
   currentPageIndex = 0;
   rowKeyCounter = 1;
   pageImageVersion = {};
+  prefetchedPreviewSrcs.clear();
 
   if (!pageList.length) {
     renderRows([]);
@@ -455,21 +565,37 @@ async function loadResults() {
   }
 
   let globalCounter = 1;
+  let parsedAll = null;
+  let boundsAll = null;
+
+  try {
+    const [parsedAllRes, boundsAllRes] = await Promise.all([
+      fetch(`/jobs/${currentJobId}/parsed`),
+      fetch(`/jobs/${currentJobId}/bounds`)
+    ]);
+    if (parsedAllRes.ok) parsedAll = await parsedAllRes.json();
+    if (boundsAllRes.ok) boundsAll = await boundsAllRes.json();
+  } catch (_) {
+    parsedAll = null;
+    boundsAll = null;
+  }
 
   for (let i = 0; i < pageList.length; i += 1) {
     const pageKey = pageList[i].replace('.png', '');
+    let rows = parsedAll && Array.isArray(parsedAll[pageKey]) ? parsedAll[pageKey] : null;
+    let bounds = boundsAll && Array.isArray(boundsAll[pageKey]) ? boundsAll[pageKey] : null;
 
-    const [parsedRes, boundsRes] = await Promise.all([
-      fetch(`/jobs/${currentJobId}/parsed/${pageKey}`),
-      fetch(`/jobs/${currentJobId}/rows/${pageKey}/bounds`)
-    ]);
-
-    if (!parsedRes.ok) {
-      throw new Error(`Failed to read parsed rows for ${pageKey}`);
+    if (!rows) {
+      const parsedRes = await fetch(`/jobs/${currentJobId}/parsed/${pageKey}`);
+      if (!parsedRes.ok) {
+        throw new Error(`Failed to read parsed rows for ${pageKey}`);
+      }
+      rows = await parsedRes.json();
     }
-
-    const rows = await parsedRes.json();
-    const bounds = boundsRes.ok ? await boundsRes.json() : [];
+    if (!bounds) {
+      const boundsRes = await fetch(`/jobs/${currentJobId}/rows/${pageKey}/bounds`);
+      bounds = boundsRes.ok ? await boundsRes.json() : [];
+    }
 
     rowsByPage[pageKey] = Array.isArray(rows) ? rows : [];
     boundsByPage[pageKey] = Array.isArray(bounds) ? bounds : [];
@@ -498,6 +624,37 @@ async function loadResults() {
   flattenPoints = [];
   updateFlattenButtons();
   renderCurrentPage();
+  await loadAccountSummary();
+  drawBoundingBoxes();
+}
+
+async function loadAccountSummary() {
+  if (!accountNameSummary || !accountNumberSummary || !currentJobId) return;
+  accountNameSummary.textContent = '-';
+  accountNumberSummary.textContent = '-';
+  try {
+    const res = await fetch(`/jobs/${currentJobId}/diagnostics`);
+    if (!res.ok) return;
+    const diagnostics = await res.json();
+    const job = diagnostics && diagnostics.job ? diagnostics.job : {};
+    accountNameSummary.textContent = (job.account_name || '-').toString();
+    accountNumberSummary.textContent = (job.account_number || '-').toString();
+    identityBoundsByPage = {};
+    const nameBox = job.account_name_bbox;
+    const numberBox = job.account_number_bbox;
+    if (nameBox && nameBox.page) {
+      identityBoundsByPage[nameBox.page] = identityBoundsByPage[nameBox.page] || [];
+      identityBoundsByPage[nameBox.page].push({ ...nameBox, kind: 'account_name' });
+    }
+    if (numberBox && numberBox.page) {
+      identityBoundsByPage[numberBox.page] = identityBoundsByPage[numberBox.page] || [];
+      identityBoundsByPage[numberBox.page].push({ ...numberBox, kind: 'account_number' });
+    }
+  } catch (_) {
+    accountNameSummary.textContent = '-';
+    accountNumberSummary.textContent = '-';
+    identityBoundsByPage = {};
+  }
 }
 
 function renderRows(rows) {
@@ -584,21 +741,28 @@ function renderCurrentPage() {
   nextPageBtn.disabled = currentPageIndex >= pageList.length - 1;
   syncPageSelect();
 
-  const src = `/jobs/${currentJobId}/cleaned/${pageFile}?v=${pageImageVersion[pageKey] || 0}`;
+  const src = `/jobs/${currentJobId}/preview/${pageKey}?v=${pageImageVersion[pageKey] || 0}`;
   if (previewImage.dataset.src !== src) {
-    hideMagnifier();
+    resetPreviewTransform();
     previewImage.style.display = 'none';
     previewImage.dataset.src = src;
     previewImage.src = src;
+    if (previewImage.complete && previewImage.naturalWidth > 0) {
+      previewImage.style.display = 'block';
+      drawBoundingBoxes();
+      applyPreviewTransform();
+    }
   } else {
     previewImage.style.display = 'block';
     drawBoundingBoxes();
+    applyPreviewTransform();
   }
 
   const activeRow = parsedRows.find((r) => r.row_key === activeRowKey);
   if (activeRow && activeRow.page !== pageKey) {
     highlightSelectedTableRow();
   }
+  prefetchPreviewNeighbors();
   updateFlattenButtons();
 }
 
@@ -618,12 +782,23 @@ function drawBoundingBoxes() {
 
   const wrapRect = previewWrap.getBoundingClientRect();
   const rect = getRenderedImageRect(previewImage);
-  previewCanvas.width = Math.round(rect.width);
-  previewCanvas.height = Math.round(rect.height);
-  previewCanvas.style.width = `${Math.round(rect.width)}px`;
-  previewCanvas.style.height = `${Math.round(rect.height)}px`;
-  previewCanvas.style.left = `${Math.round(rect.left - wrapRect.left)}px`;
-  previewCanvas.style.top = `${Math.round(rect.top - wrapRect.top)}px`;
+  const dpr = window.devicePixelRatio || 1;
+  const baseLeft = rect.left - wrapRect.left;
+  const baseTop = rect.top - wrapRect.top;
+  const centerX = baseLeft + (rect.width / 2) + previewPanX;
+  const centerY = baseTop + (rect.height / 2) + previewPanY;
+  const drawW = Math.max(1, rect.width * previewZoom);
+  const drawH = Math.max(1, rect.height * previewZoom);
+  const canvasLeft = centerX - (drawW / 2);
+  const canvasTop = centerY - (drawH / 2);
+
+  previewCanvas.width = Math.round(drawW * dpr);
+  previewCanvas.height = Math.round(drawH * dpr);
+  previewCanvas.style.width = `${Math.round(drawW)}px`;
+  previewCanvas.style.height = `${Math.round(drawH)}px`;
+  previewCanvas.style.left = `${Math.round(canvasLeft)}px`;
+  previewCanvas.style.top = `${Math.round(canvasTop)}px`;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
 
@@ -635,39 +810,66 @@ function drawBoundingBoxes() {
     : null;
 
   bounds.forEach((b) => {
-    const x1 = b.x1 * previewCanvas.width;
-    const y1 = b.y1 * previewCanvas.height;
-    const x2 = b.x2 * previewCanvas.width;
-    const y2 = b.y2 * previewCanvas.height;
+    const mappedGlobalId = pageRowToGlobal[`${pageKey}|${b.row_id}`];
+    if (!mappedGlobalId) {
+      // Row was deleted from table (or is otherwise unmapped), so hide its bbox.
+      return;
+    }
+
+    const x1 = b.x1 * drawW;
+    const y1 = b.y1 * drawH;
+    const x2 = b.x2 * drawW;
+    const y2 = b.y2 * drawH;
 
     const width = Math.max(1, x2 - x1);
     const height = Math.max(1, y2 - y1);
-    const globalId = pageRowToGlobal[`${pageKey}|${b.row_id}`] || b.row_id;
+    const globalId = mappedGlobalId;
     const isActive = activeOcrRowId !== null && globalId === activeOcrRowId;
 
-    ctx.strokeStyle = isActive ? '#22c55e' : '#ef4444';
-    ctx.lineWidth = isActive ? 1.4 : 0.8;
+    ctx.strokeStyle = isActive ? '#16a34a' : '#22c55e';
+    ctx.lineWidth = isActive ? 1.6 : 1.0;
     ctx.strokeRect(x1, y1, width, height);
 
-    ctx.fillStyle = isActive ? '#22c55e' : '#ef4444';
-    ctx.font = '600 11px "Roboto Mono", monospace';
+    ctx.fillStyle = isActive ? '#16a34a' : '#22c55e';
+    const labelSize = Math.max(11, Math.min(18, 11 + ((previewZoom - 1) * 4)));
+    ctx.font = `600 ${labelSize}px "Manrope", sans-serif`;
     const textWidth = ctx.measureText(globalId).width;
     const labelX = Math.max(2, x1 - textWidth - 6);
-    const labelY = Math.min(previewCanvas.height - 2, Math.max(12, y1 + (height / 2) + 4));
+    const labelY = Math.min(drawH - 2, Math.max(labelSize, y1 + (height / 2) + 4));
     ctx.fillText(globalId, labelX, labelY);
+  });
+
+  const identityBoxes = identityBoundsByPage[pageKey] || [];
+  identityBoxes.forEach((b) => {
+    const x1 = Number(b.x1 || 0) * drawW;
+    const y1 = Number(b.y1 || 0) * drawH;
+    const x2 = Number(b.x2 || 0) * drawW;
+    const y2 = Number(b.y2 || 0) * drawH;
+    const width = Math.max(1, x2 - x1);
+    const height = Math.max(1, y2 - y1);
+    const label = b.kind === 'account_number' ? 'ACC NO' : 'ACC NAME';
+
+    ctx.strokeStyle = '#0ea5e9';
+    ctx.lineWidth = 1.2;
+    ctx.strokeRect(x1, y1, width, height);
+
+    ctx.fillStyle = '#0ea5e9';
+    ctx.font = '600 11px "Manrope", sans-serif';
+    ctx.fillText(label, Math.max(2, x1 + 2), Math.max(11, y1 - 3));
   });
 
   if (flattenMode) {
     drawFlattenOverlay(ctx);
   }
 
-  previewOverlayDataUrl = previewCanvas.toDataURL('image/png');
+  previewOverlayDataUrl = '';
 }
 
 function getRenderedImageRect(imgEl) {
-  const rect = imgEl.getBoundingClientRect();
-  const boxW = rect.width;
-  const boxH = rect.height;
+  const container = previewWrap || imgEl.parentElement;
+  const rect = container ? container.getBoundingClientRect() : imgEl.getBoundingClientRect();
+  const boxW = container ? container.clientWidth : rect.width;
+  const boxH = container ? container.clientHeight : rect.height;
   const naturalW = imgEl.naturalWidth || boxW;
   const naturalH = imgEl.naturalHeight || boxH;
   if (!boxW || !boxH || !naturalW || !naturalH) {
@@ -717,51 +919,88 @@ function syncPageSelect() {
   pageSelect.value = pageList.length ? String(currentPageIndex) : '';
 }
 
-function hideMagnifier() {
-  if (!previewMagnifier) return;
-  previewMagnifier.style.display = 'none';
+function applyPreviewTransform() {
+  const transform = `translate(${Math.round(previewPanX)}px, ${Math.round(previewPanY)}px) scale(${previewZoom.toFixed(3)})`;
+  previewImage.style.transform = transform;
+  previewCanvas.style.transform = 'none';
+  if (zoomLevel) {
+    zoomLevel.textContent = `${Math.round(previewZoom * 100)}%`;
+  }
+  if (previewWrap) {
+    previewWrap.classList.toggle('pannable', previewZoom > getFillPreviewZoom() + 0.001 && !flattenMode);
+    if (!isPreviewPanning) {
+      previewWrap.classList.remove('panning');
+    }
+  }
 }
 
-function updateMagnifier(event) {
-  if (!previewMagnifier || !previewWrap || !pageList.length || !previewImage.naturalWidth || flattenMode) {
-    hideMagnifier();
+function resetPreviewTransform() {
+  previewZoom = getFillPreviewZoom();
+  previewPanX = 0;
+  previewPanY = getDefaultTopPanY(previewZoom);
+  stopPreviewPan();
+  applyPreviewTransform();
+  if (pageList.length && previewImage.naturalWidth) {
+    drawBoundingBoxes();
+  }
+}
+
+function clampPreviewPan() {
+  const fillZoom = getFillPreviewZoom();
+  if (!previewWrap || !previewImage.naturalWidth || previewZoom < fillZoom - 0.001) {
+    previewPanX = 0;
+    previewPanY = 0;
     return;
   }
+  const rect = getRenderedImageRect(previewImage);
+  const maxPanX = Math.max(0, ((rect.width * previewZoom) - rect.width) / 2);
+  const maxPanY = Math.max(0, ((rect.height * previewZoom) - rect.height) / 2);
+  previewPanX = clamp(previewPanX, -maxPanX, maxPanX);
+  previewPanY = clamp(previewPanY, -maxPanY, maxPanY);
+}
 
-  const imageRect = getRenderedImageRect(previewImage);
-  const wrapRect = previewWrap.getBoundingClientRect();
-  const x = event.clientX;
-  const y = event.clientY;
-  const withinImage = x >= imageRect.left && x <= imageRect.right && y >= imageRect.top && y <= imageRect.bottom;
-  if (!withinImage) {
-    hideMagnifier();
-    return;
+function stopPreviewPan() {
+  if (!isPreviewPanning) return;
+  isPreviewPanning = false;
+  if (previewWrap) {
+    previewWrap.classList.remove('panning');
   }
+}
 
-  const lensW = previewMagnifier.offsetWidth || 160;
-  const lensH = previewMagnifier.offsetHeight || 110;
-  const localX = x - imageRect.left;
-  const localY = y - imageRect.top;
-  const bgX = -(localX * MAGNIFIER_ZOOM - lensW / 2);
-  const bgY = -(localY * MAGNIFIER_ZOOM - lensH / 2);
+function getFillPreviewZoom() {
+  if (!previewWrap || !previewImage.naturalWidth) return 1;
+  const rect = getRenderedImageRect(previewImage);
+  const wrapW = previewWrap.clientWidth || 1;
+  const wrapH = previewWrap.clientHeight || 1;
+  if (rect.width <= 0 || rect.height <= 0) return 1;
+  const fillZoom = Math.max(wrapW / rect.width, wrapH / rect.height);
+  return Math.max(PREVIEW_ZOOM_MIN, Math.min(PREVIEW_ZOOM_MAX, fillZoom));
+}
 
-  const pageSrc = previewImage.currentSrc || previewImage.src;
-  if (previewOverlayDataUrl) {
-    previewMagnifier.style.backgroundImage = `url("${previewOverlayDataUrl}"), url("${pageSrc}")`;
-  } else {
-    previewMagnifier.style.backgroundImage = `url("${pageSrc}")`;
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function getDefaultTopPanY(zoom) {
+  if (!previewWrap || !previewImage.naturalWidth) return 0;
+  const rect = getRenderedImageRect(previewImage);
+  const maxPanY = Math.max(0, ((rect.height * zoom) - rect.height) / 2);
+  return maxPanY > 0 ? maxPanY : 0;
+}
+
+function stepPreviewZoom(delta) {
+  if (flattenMode || !pageList.length || !previewImage.naturalWidth) return;
+  const fillZoom = getFillPreviewZoom();
+  const nextZoom = clamp(previewZoom + delta, PREVIEW_ZOOM_MIN, PREVIEW_ZOOM_MAX);
+  if (Math.abs(nextZoom - previewZoom) < 0.001) return;
+  previewZoom = nextZoom;
+  if (previewZoom < fillZoom - 0.001) {
+    previewPanX = 0;
+    previewPanY = 0;
   }
-  previewMagnifier.style.backgroundSize = `${Math.round(imageRect.width * MAGNIFIER_ZOOM)}px ${Math.round(imageRect.height * MAGNIFIER_ZOOM)}px`;
-  previewMagnifier.style.backgroundPosition = `${Math.round(bgX)}px ${Math.round(bgY)}px`;
-
-  let lensLeft = x - wrapRect.left + 16;
-  let lensTop = y - wrapRect.top + 16;
-  lensLeft = Math.max(4, Math.min(lensLeft, wrapRect.width - lensW - 4));
-  lensTop = Math.max(4, Math.min(lensTop, wrapRect.height - lensH - 4));
-
-  previewMagnifier.style.left = `${Math.round(lensLeft)}px`;
-  previewMagnifier.style.top = `${Math.round(lensTop)}px`;
-  previewMagnifier.style.display = 'block';
+  clampPreviewPan();
+  applyPreviewTransform();
+  drawBoundingBoxes();
 }
 
 function clearCanvas() {
@@ -775,7 +1014,7 @@ function setPreviewEmptyState() {
   previewImage.removeAttribute('src');
   previewImage.removeAttribute('data-src');
   previewImage.style.display = 'none';
-  hideMagnifier();
+  resetPreviewTransform();
   previewCanvas.style.left = '0px';
   previewCanvas.style.top = '0px';
   pageIndicator.textContent = 'Page 0 / 0';
@@ -809,7 +1048,7 @@ function drawFlattenOverlay(ctx) {
     ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = '#1f2937';
-    ctx.font = '600 10px "Roboto Mono", monospace';
+    ctx.font = '600 10px "Manrope", sans-serif';
     ctx.fillText(String(idx + 1), pt.x + 6, pt.y - 6);
   });
 }
@@ -821,6 +1060,10 @@ function updateFlattenButtons() {
   applyFlattenBtn.disabled = flattenBusy || !flattenMode || flattenPoints.length !== 4;
   resetFlattenBtn.disabled = flattenBusy || !pageList.length;
   previewCanvas.style.pointerEvents = flattenMode && !flattenBusy ? 'auto' : 'none';
+  if (flattenMode) {
+    stopPreviewPan();
+  }
+  applyPreviewTransform();
 }
 
 async function refreshCurrentPageData(pageKey) {
@@ -871,33 +1114,8 @@ function scrollToResults() {
 }
 
 function computeAverageDailyBalance(rows) {
-  const datedBalances = [];
-
-  rows.forEach((row, idx) => {
-    const balance = normalizeAmount(row.balance || '');
-    const date = parseStatementDate(row.date || '');
-    if (!Number.isFinite(balance) || !date) return;
-    datedBalances.push({ idx, date, balance });
-  });
-
-  if (!datedBalances.length) return '-';
-
-  datedBalances.sort((a, b) => {
-    const diff = a.date.getTime() - b.date.getTime();
-    if (diff !== 0) return diff;
-    return a.idx - b.idx;
-  });
-
-  // Keep the last known balance per transaction date.
-  const daily = [];
-  datedBalances.forEach((entry) => {
-    const key = toDateKey(entry.date);
-    if (daily.length && daily[daily.length - 1].key === key) {
-      daily[daily.length - 1].balance = entry.balance;
-      return;
-    }
-    daily.push({ key, date: entry.date, balance: entry.balance });
-  });
+  const daily = buildDailyBalances(rows);
+  if (!daily.length) return '-';
 
   let weightedTotal = 0;
   let totalDays = 0;
@@ -912,6 +1130,85 @@ function computeAverageDailyBalance(rows) {
 
   if (!totalDays) return '-';
   return formatMoney(weightedTotal / totalDays, null, null, true);
+}
+
+function buildDailyBalances(rows) {
+  const datedBalances = [];
+
+  rows.forEach((row, idx) => {
+    const balance = normalizeAmount(row.balance || '');
+    const date = parseStatementDate(row.date || '');
+    if (!Number.isFinite(balance) || !date) return;
+    datedBalances.push({ idx, date, balance });
+  });
+
+  if (!datedBalances.length) return [];
+
+  datedBalances.sort((a, b) => {
+    const diff = a.date.getTime() - b.date.getTime();
+    if (diff !== 0) return diff;
+    return a.idx - b.idx;
+  });
+
+  const daily = [];
+  datedBalances.forEach((entry) => {
+    const key = toDateKey(entry.date);
+    if (daily.length && daily[daily.length - 1].key === key) {
+      daily[daily.length - 1].balance = entry.balance;
+      return;
+    }
+    daily.push({ key, date: entry.date, balance: entry.balance });
+  });
+  return daily;
+}
+
+function computeMonthlySummary(rows) {
+  const transactions = [];
+  rows.forEach((row, idx) => {
+    const date = parseStatementDate(row.date || '');
+    if (!date) return;
+    transactions.push({
+      idx,
+      date,
+      debit: normalizeAmount(row.debit || ''),
+      credit: normalizeAmount(row.credit || ''),
+    });
+  });
+  if (!transactions.length) return [];
+
+  transactions.sort((a, b) => {
+    const diff = a.date.getTime() - b.date.getTime();
+    if (diff !== 0) return diff;
+    return a.idx - b.idx;
+  });
+
+  const monthMap = new Map();
+  const firstDate = transactions[0].date;
+  const lastDate = transactions[transactions.length - 1].date;
+  seedMonthBuckets(monthMap, firstDate, lastDate);
+
+  transactions.forEach((tx) => {
+    const bucket = monthMap.get(monthKey(tx.date));
+    if (!bucket) return;
+    if (Number.isFinite(tx.debit)) bucket.debit += Math.abs(tx.debit);
+    if (Number.isFinite(tx.credit)) bucket.credit += Math.abs(tx.credit);
+  });
+
+  const daily = buildDailyBalances(rows);
+  for (let i = 0; i < daily.length; i += 1) {
+    const current = daily[i];
+    const nextDate = i < daily.length - 1 ? daily[i + 1].date : addDaysUTC(current.date, 1);
+    allocateMonthlyBalanceRange(monthMap, current.date, nextDate, current.balance);
+  }
+
+  return Array.from(monthMap.values())
+    .filter((bucket) => bucket.days > 0 || bucket.debit > 0 || bucket.credit > 0)
+    .map((bucket) => ({
+      monthLabel: bucket.label,
+      debit: bucket.debit,
+      credit: bucket.credit,
+      adb: bucket.days > 0 ? (bucket.weightedBalance / bucket.days) : 0,
+    }));
 }
 
 function formatMoney(parsedValue, rawA, rawB, absolute = false) {
@@ -1007,31 +1304,52 @@ function toDateKey(date) {
   return `${y}-${m}-${d}`;
 }
 
-function buildCsv(rows) {
-  const header = ['row_id', 'page', 'date', 'description', 'debit', 'credit', 'balance'];
-  const lines = [header.join(',')];
-
-  rows.forEach((row) => {
-    const fields = [
-      row.global_row_id || '',
-      row.page || '',
-      row.date || '',
-      row.description || '',
-      row.debit || '',
-      row.credit || '',
-      row.balance || ''
-    ].map(csvEscape);
-
-    lines.push(fields.join(','));
-  });
-
-  return `${lines.join('\n')}\n`;
+function monthKey(date) {
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+  return `${y}-${m}`;
 }
 
-function csvEscape(value) {
-  const text = String(value);
-  if (!/[",\n]/.test(text)) return text;
-  return `"${text.replace(/"/g, '""')}"`;
+function monthLabel(date) {
+  return date.toLocaleDateString('en-US', {
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+function seedMonthBuckets(monthMap, firstDate, lastDate) {
+  let cursor = new Date(Date.UTC(firstDate.getUTCFullYear(), firstDate.getUTCMonth(), 1));
+  const monthCap = new Date(Date.UTC(lastDate.getUTCFullYear(), lastDate.getUTCMonth(), 1));
+  while (cursor.getTime() <= monthCap.getTime()) {
+    const key = monthKey(cursor);
+    monthMap.set(key, {
+      label: monthLabel(cursor),
+      debit: 0,
+      credit: 0,
+      weightedBalance: 0,
+      days: 0,
+    });
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
+  }
+}
+
+function allocateMonthlyBalanceRange(monthMap, startDate, endDate, balance) {
+  if (!Number.isFinite(balance)) return;
+  let cursor = new Date(startDate.getTime());
+
+  while (cursor.getTime() < endDate.getTime()) {
+    const monthStart = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth(), 1));
+    const nextMonthStart = new Date(Date.UTC(monthStart.getUTCFullYear(), monthStart.getUTCMonth() + 1, 1));
+    const segmentEnd = endDate.getTime() < nextMonthStart.getTime() ? endDate : nextMonthStart;
+    const days = Math.max(1, diffDaysUTC(cursor, segmentEnd));
+    const bucket = monthMap.get(monthKey(cursor));
+    if (bucket) {
+      bucket.weightedBalance += balance * days;
+      bucket.days += days;
+    }
+    cursor = segmentEnd;
+  }
 }
 
 function makeEditableCell(row, field, isAmount = false) {
@@ -1062,56 +1380,30 @@ function makeEditableCell(row, field, isAmount = false) {
     updateSummaryFromRows(parsedRows);
   });
 
+  input.addEventListener('change', () => {
+    const normalized = normalizeFieldValue(field, input.value);
+    row[field] = normalized;
+    updateSummaryFromRows(parsedRows);
+  });
+
   cell.appendChild(input);
   return cell;
 }
 
 function makeRowActionsMenu(rowKey) {
   const wrap = document.createElement('div');
-  wrap.className = 'row-menu';
-
-  const trigger = document.createElement('button');
-  trigger.type = 'button';
-  trigger.className = 'row-action row-action-more';
-  trigger.setAttribute('aria-label', 'Row actions');
-  trigger.title = 'Row actions';
-  trigger.textContent = '...';
-
-  const menu = document.createElement('div');
-  menu.className = 'row-menu-list';
-  menu.innerHTML = ''
-    + '<button type="button" class="row-menu-item row-menu-insert">Insert row</button>'
-    + '<button type="button" class="row-menu-item row-menu-delete">Delete row</button>';
-
-  trigger.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const isOpen = wrap.classList.contains('open');
-    closeAllRowMenus();
-    if (!isOpen) {
-      wrap.classList.add('open');
-    }
-  });
-
-  menu.querySelector('.row-menu-insert').addEventListener('click', (e) => {
-    e.stopPropagation();
+  wrap.className = 'row-actions-inline';
+  wrap.appendChild(makeRowActionButton('fa-solid fa-plus', 'Insert row', 'insert', () => {
     insertRowAfter(rowKey);
-    closeAllRowMenus();
-  });
-  menu.querySelector('.row-menu-delete').addEventListener('click', (e) => {
-    e.stopPropagation();
+  }));
+  wrap.appendChild(makeRowActionButton('fa-solid fa-trash', 'Delete row', 'delete', () => {
     deleteRowByKey(rowKey);
-    closeAllRowMenus();
-  });
-
-  wrap.appendChild(trigger);
-  wrap.appendChild(menu);
+  }));
   return wrap;
 }
 
 function closeAllRowMenus() {
-  document.querySelectorAll('.row-menu.open').forEach((el) => {
-    el.classList.remove('open');
-  });
+  // No-op for icon-based row actions.
 }
 
 function makeRowActionButton(iconClass, ariaLabel, kind, onClick) {
@@ -1172,6 +1464,7 @@ function deleteRowByKey(rowKey) {
 
 function rebuildPageRowMap() {
   pageRowToGlobal = {};
+  identityBoundsByPage = {};
   let ocrCounter = 1;
   parsedRows.forEach((row) => {
     if (!row.page) {
@@ -1208,6 +1501,25 @@ function updateSummaryFromRows(rows) {
   totalDebitTransactions.textContent = String(countAmountTransactions(rows, 'debit'));
   totalCreditTransactions.textContent = String(countAmountTransactions(rows, 'credit'));
   endingBalance.textContent = rows.length ? computeAverageDailyBalance(rows) : '-';
+  renderMonthlySummary(rows);
+}
+
+function renderMonthlySummary(rows) {
+  const monthlySummaryBody = document.getElementById('monthlySummaryBody');
+  if (!monthlySummaryBody) return;
+  const monthly = computeMonthlySummary(rows);
+  if (!monthly.length) {
+    monthlySummaryBody.innerHTML = '<tr><td class="monthly-empty" colspan="4">No monthly data</td></tr>';
+    return;
+  }
+  monthlySummaryBody.innerHTML = monthly.map((item) => (
+    `<tr>
+      <td>${escapeHtml(item.monthLabel)}</td>
+      <td>${escapeHtml(formatPesoValue(Math.abs(item.debit), true))}</td>
+      <td>${escapeHtml(formatPesoValue(Math.abs(item.credit), true))}</td>
+      <td>${escapeHtml(formatPesoValue(item.adb, true))}</td>
+    </tr>`
+  )).join('');
 }
 
 function countAmountTransactions(rows, field) {
@@ -1263,14 +1575,15 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function updateProgressUI(progress, labelText, step, ocrModel = null) {
+function updateProgressUI(progress, labelText, step, ocrModel = null, parseMode = null) {
   const clamped = Math.max(0, Math.min(100, Math.round(progress)));
   progressFill.style.width = `${clamped}%`;
   progressPercent.textContent = `${clamped}%`;
   progressLabel.textContent = labelText;
   progressStep.textContent = `Step: ${stepToLabel(step)}`;
   if (progressModel) {
-    progressModel.textContent = `OCR Model: ${ocrModel || '-'}`;
+    const modeLabel = (parseMode || 'text').toString().toUpperCase();
+    progressModel.textContent = `Mode: ${modeLabel}${modeLabel === 'OCR' ? ` | OCR Model: ${ocrModel || '-'}` : ''}`;
   }
   if (progressElapsed && !elapsedStartMs) {
     progressElapsed.textContent = 'Elapsed: 00:00';
@@ -1332,6 +1645,7 @@ function inferProgress(status, step) {
   if (step === 'image_cleaning') return 40;
   if (step === 'text_extraction') return 65;
   if (step === 'page_ocr') return 80;
+  if (step === 'page_text') return 80;
   if (step === 'parsing' || step === 'saving_results') return 92;
   return 10;
 }
@@ -1348,7 +1662,8 @@ function stepToLabel(step) {
   if (key === 'image_cleaning') return 'Cleaning page images';
   if (key === 'text_extraction') return 'Extracting PDF text';
   if (key === 'page_ocr') return 'Running OCR per page';
-  if (key === 'saving_results') return 'Saving OCR results';
+  if (key === 'page_text') return 'Parsing text per page';
+  if (key === 'saving_results') return 'Saving results';
   if (key === 'parsing') return 'Parsing extracted rows';
   if (key === 'completed' || key === 'done') return 'Completed';
   if (key === 'failed') return 'Failed';
@@ -1360,6 +1675,8 @@ function resetResults() {
   totalDebitTransactions.textContent = '0';
   totalCreditTransactions.textContent = '0';
   endingBalance.textContent = '-';
+  if (accountNameSummary) accountNameSummary.textContent = '-';
+  if (accountNumberSummary) accountNumberSummary.textContent = '-';
   tableBody.innerHTML = '';
   pageList = [];
   parsedRows = [];
@@ -1370,6 +1687,7 @@ function resetResults() {
   currentPageIndex = 0;
   rowKeyCounter = 1;
   pageImageVersion = {};
+  prefetchedPreviewSrcs.clear();
   flattenMode = false;
   flattenPoints = [];
   flattenBusy = false;
@@ -1381,6 +1699,27 @@ function resetResults() {
   updateSummaryFromRows([]);
   updateFlattenButtons();
   renderCurrentPage();
+}
+
+function buildPreviewSrc(pageKey) {
+  return `/jobs/${currentJobId}/preview/${pageKey}?v=${pageImageVersion[pageKey] || 0}`;
+}
+
+function prefetchPreviewPageByIndex(idx) {
+  if (!currentJobId || idx < 0 || idx >= pageList.length) return;
+  const pageKey = pageList[idx].replace('.png', '');
+  const src = buildPreviewSrc(pageKey);
+  if (prefetchedPreviewSrcs.has(src)) return;
+  prefetchedPreviewSrcs.add(src);
+  const img = new Image();
+  img.decoding = 'async';
+  img.src = src;
+}
+
+function prefetchPreviewNeighbors() {
+  prefetchPreviewPageByIndex(currentPageIndex + 1);
+  prefetchPreviewPageByIndex(currentPageIndex - 1);
+  prefetchPreviewPageByIndex(currentPageIndex + 2);
 }
 
 function formatFileSize(bytes) {

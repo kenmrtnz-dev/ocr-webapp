@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Bank Statement OCR Processing</title>
     <link rel="stylesheet" href="/static/styles.css">
-    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body>
@@ -22,9 +22,13 @@
                         <i class="fas fa-cloud-upload-alt"></i>
                     </div>
                     <div class="upload-text">
-                        <h3>Drag & drop your file here</h3>
-                        <p>or</p>
                         <button class="browse-button" id="browseButton">Browse</button>
+                        <h3>Upload File</h3>
+                        <label class="mode-toggle" for="ocrToggle" title="Off = Text Only, On = OCR">
+                            <span class="mode-toggle-text" id="modeToggleText">TEXT</span>
+                            <input type="checkbox" id="ocrToggle" class="mode-toggle-input" aria-label="OCR Mode">
+                            <span class="mode-toggle-track" aria-hidden="true"></span>
+                        </label>
                         <input type="file" id="fileInput" class="file-input" accept=".pdf,application/pdf">
                     </div>
                     <p class="formats-info">Accepted format: PDF</p>
@@ -50,43 +54,94 @@
                     <div class="progress-track" aria-hidden="true">
                         <div class="progress-fill" id="progressFill"></div>
                     </div>
-                    <p class="progress-step" id="progressStep">Queued</p>
-                    <p class="progress-elapsed" id="progressElapsed">Elapsed: 00:00</p>
+                    <div class="progress-info-row">
+                        <p class="progress-step" id="progressStep">Queued</p>
+                        <p class="progress-elapsed" id="progressElapsed">Elapsed: 00:00</p>
+                    </div>
                     <p class="progress-model" id="progressModel">OCR Model: -</p>
                 </div>
             </div>
 
             <div class="results-section">
-                <div class="summary-card">
-                    <h3>Summary</h3>
-                    <div class="summary-items">
-                        <div class="summary-item">
-                            <div class="summary-label">Total Transactions</div>
-                            <div class="summary-value" id="totalTransactions">45</div>
-                        </div>
-                        <div class="summary-item">
-                            <div class="summary-label">Debit Transactions</div>
-                            <div class="summary-value" id="totalDebitTransactions">0</div>
-                        </div>
-                        <div class="summary-item">
-                            <div class="summary-label">Credit Transactions</div>
-                            <div class="summary-value" id="totalCreditTransactions">0</div>
-                        </div>
-                        <div class="summary-item">
-                            <div class="summary-label">Average Daily Balance (ADB)</div>
-                            <div class="summary-value" id="endingBalance">₱0.00</div>
-                        </div>
-                    </div>
-                </div>
-
                 <div class="extracted-data">
                     <div class="section-header">
                         <h3>Extracted Data</h3>
-                        <button class="csv-button" id="downloadCSV">
-                            <i class="fas fa-download"></i> Download CSV
-                        </button>
+                        <button class="csv-button" id="downloadCSV" aria-label="Export to PDF" title="Export to PDF">Export to PDF</button>
                     </div>
                     <div class="comparison-layout">
+                        <div class="top-panels">
+                            <div class="preview-panel">
+                                <div class="preview-toolbar">
+                                    <button class="preview-nav" id="prevPageBtn">Prev</button>
+                                    <span id="pageIndicator">Page 0 / 0</span>
+                                    <button class="preview-nav" id="nextPageBtn">Next</button>
+                                    <select class="preview-page-select" id="pageSelect" aria-label="Jump to page">
+                                        <option value="">Page</option>
+                                    </select>
+                                    <button class="preview-nav preview-nav-icon" id="zoomOutBtn" aria-label="Zoom out" title="Zoom out">-</button>
+                                    <span class="preview-zoom" id="zoomLevel">100%</span>
+                                    <button class="preview-nav preview-nav-icon" id="zoomInBtn" aria-label="Zoom in" title="Zoom in">+</button>
+                                    <button class="preview-nav" id="resetViewBtn">Reset View</button>
+                                </div>
+                                <div class="preview-canvas-wrap">
+                                    <img id="previewImage" alt="Statement page preview">
+                                    <canvas id="previewCanvas"></canvas>
+                                </div>
+                            </div>
+                            <div class="summary-card">
+                                <h3>Summary</h3>
+                                <div class="summary-split">
+                                    <div class="summary-left">
+                                        <div class="summary-items">
+                                            <div class="summary-item">
+                                                <div class="summary-label">Account Name</div>
+                                                <div class="summary-value" id="accountNameSummary">-</div>
+                                            </div>
+                                            <div class="summary-item">
+                                                <div class="summary-label">Account Number</div>
+                                                <div class="summary-value" id="accountNumberSummary">-</div>
+                                            </div>
+                                            <div class="summary-item">
+                                                <div class="summary-label">Total Transactions</div>
+                                                <div class="summary-value" id="totalTransactions">45</div>
+                                            </div>
+                                            <div class="summary-item">
+                                                <div class="summary-label">Debit Transactions</div>
+                                                <div class="summary-value" id="totalDebitTransactions">0</div>
+                                            </div>
+                                            <div class="summary-item">
+                                                <div class="summary-label">Credit Transactions</div>
+                                                <div class="summary-value" id="totalCreditTransactions">0</div>
+                                            </div>
+                                            <div class="summary-item">
+                                                <div class="summary-label">Average Daily Balance (ADB)</div>
+                                                <div class="summary-value" id="endingBalance">₱0.00</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="summary-right">
+                                        <div class="monthly-summary-header">Monthly Summary</div>
+                                        <div class="monthly-summary-wrap">
+                                            <table class="monthly-summary-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Month</th>
+                                                        <th>Debit</th>
+                                                        <th>Credit</th>
+                                                        <th>ADB</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody id="monthlySummaryBody">
+                                                    <tr>
+                                                        <td colspan="4">No monthly data</td>
+                                                    </tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                         <div class="table-panel">
                             <div class="transactions-table">
                                 <div class="table-header">
@@ -99,24 +154,6 @@
                                     <div class="table-cell">Actions</div>
                                 </div>
                                 <div class="table-body"></div>
-                            </div>
-                        </div>
-                        <div class="preview-panel">
-                            <div class="preview-toolbar">
-                                <button class="preview-nav" id="prevPageBtn">Prev</button>
-                                <span id="pageIndicator">Page 0 / 0</span>
-                                <button class="preview-nav" id="nextPageBtn">Next</button>
-                                <select class="preview-page-select" id="pageSelect" aria-label="Jump to page">
-                                    <option value="">Page</option>
-                                </select>
-                                <button class="preview-nav" id="flattenModeBtn">Flatten</button>
-                                <button class="preview-nav" id="applyFlattenBtn">Apply</button>
-                                <button class="preview-nav" id="resetFlattenBtn">Reset</button>
-                            </div>
-                            <div class="preview-canvas-wrap">
-                                <img id="previewImage" alt="Statement page preview">
-                                <canvas id="previewCanvas"></canvas>
-                                <div id="previewMagnifier" aria-hidden="true"></div>
                             </div>
                         </div>
                     </div>

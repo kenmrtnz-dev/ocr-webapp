@@ -8,11 +8,11 @@ from celery import Celery
 from pdf2image import convert_from_path, pdfinfo_from_path
 from PIL import Image
 
-from app.bank_profiles import detect_bank_profile
+from app.bank_profiles import detect_bank_profile, extract_account_identity, find_value_bounds
 from app.image_cleaner import clean_page
 from app.ocr_engine import ocr_image
 from app.pdf_text_extract import extract_pdf_layout_pages
-from app.statement_parser import parse_page_with_profile_fallback
+from app.statement_parser import parse_page_with_profile_fallback, is_transaction_row
 
 
 DATA_DIR = os.getenv("DATA_DIR", "/data")
@@ -108,8 +108,9 @@ def prepare_draft(job_id: str):
 
 
 @celery.task
-def process_pdf(job_id: str):
+def process_pdf(job_id: str, parse_mode: str = "text"):
     print(f"[WORKER] Starting job {job_id}")
+    parse_mode = _normalize_parse_mode(parse_mode)
 
     job_dir = os.path.join(DATA_DIR, "jobs", job_id)
     input_pdf = os.path.join(job_dir, "input", "document.pdf")
@@ -132,49 +133,9 @@ def process_pdf(job_id: str):
         nonlocal last_progress
         safe_progress = max(last_progress, min(100, int(progress)))
         last_progress = safe_progress
-        update_status(job_dir, status, step=step, progress=safe_progress, **extra)
+        update_status(job_dir, status, step=step, progress=safe_progress, parse_mode=parse_mode, **extra)
 
     try:
-        preprocess_cfg = _read_preprocess_config(job_dir)
-        use_existing_cleaned = bool(preprocess_cfg.get("use_existing_cleaned"))
-        existing_pages = sorted(f for f in os.listdir(pages_dir) if f.endswith(".png"))
-        existing_cleaned = sorted(f for f in os.listdir(cleaned_dir) if f.endswith(".png"))
-
-        if use_existing_cleaned and existing_pages and existing_cleaned:
-            pages = [None] * len(existing_cleaned)
-            page_files = existing_pages
-            report("processing", "pdf_to_images", 25, pages=len(pages), ocr_backend=OCR_BACKEND)
-            report("processing", "image_cleaning", 45, pages=len(pages), ocr_backend=OCR_BACKEND)
-        else:
-            report("processing", "pdf_to_images", 5, ocr_backend=OCR_BACKEND)
-
-            total_pages = _render_pdf_pages(
-                input_pdf=input_pdf,
-                pages_dir=pages_dir,
-                step_name="pdf_to_images",
-                progress_start=5,
-                progress_end=25,
-                report_fn=report,
-                dpi=PREVIEW_DPI,
-            )
-            pages = [None] * total_pages
-
-            report("processing", "image_cleaning", 25, pages=len(pages), ocr_backend=OCR_BACKEND)
-
-            page_files = sorted(os.listdir(pages_dir))
-            for i, page_file in enumerate(page_files, start=1):
-                src = os.path.join(pages_dir, page_file)
-                dst = os.path.join(cleaned_dir, page_file)
-                cleaned = clean_page(src)
-                cv2.imwrite(dst, cleaned)
-                report(
-                    "processing",
-                    "image_cleaning",
-                    25 + int((i / max(len(page_files), 1)) * 20),
-                    pages=len(pages),
-                    ocr_backend=OCR_BACKEND,
-                )
-
         parsed_output: Dict[str, List[Dict]] = {}
         bounds_output: Dict[str, List[Dict]] = {}
         layout_pages: List[Dict] = []
@@ -185,73 +146,184 @@ def process_pdf(job_id: str):
             text_extract_error = str(exc)
             layout_pages = []
 
+        preprocess_cfg = _read_preprocess_config(job_dir)
+        use_existing_cleaned = bool(preprocess_cfg.get("use_existing_cleaned"))
+        existing_pages = sorted(f for f in os.listdir(pages_dir) if f.endswith(".png"))
+        existing_cleaned = sorted(f for f in os.listdir(cleaned_dir) if f.endswith(".png"))
+
+        if parse_mode == "ocr":
+            full_preview_pipeline = bool(use_existing_cleaned and existing_pages and existing_cleaned)
+            if full_preview_pipeline:
+                page_files = existing_pages
+                report("processing", "pdf_to_images", 25, pages=len(page_files), ocr_backend=OCR_BACKEND)
+                report("processing", "image_cleaning", 45, pages=len(page_files), ocr_backend=OCR_BACKEND)
+            else:
+                report("processing", "pdf_to_images", 5, ocr_backend=OCR_BACKEND)
+                total_pages = _render_pdf_pages(
+                    input_pdf=input_pdf,
+                    pages_dir=pages_dir,
+                    step_name="pdf_to_images",
+                    progress_start=5,
+                    progress_end=25,
+                    report_fn=report,
+                    dpi=PREVIEW_DPI,
+                )
+                page_files = [f"page_{i:03}.png" for i in range(1, total_pages + 1)]
+                report("processing", "image_cleaning", 25, pages=len(page_files), ocr_backend=OCR_BACKEND)
+                for i, page_file in enumerate(page_files, start=1):
+                    src = os.path.join(pages_dir, page_file)
+                    dst = os.path.join(cleaned_dir, page_file)
+                    cleaned = clean_page(src)
+                    cv2.imwrite(dst, cleaned)
+                    report(
+                        "processing",
+                        "image_cleaning",
+                        25 + int((i / max(len(page_files), 1)) * 20),
+                        pages=len(page_files),
+                        ocr_backend=OCR_BACKEND,
+                    )
+        else:
+            if layout_pages:
+                page_files = [f"page_{i:03}.png" for i in range(1, len(layout_pages) + 1)]
+            else:
+                try:
+                    info = pdfinfo_from_path(input_pdf)
+                    total_pages = int(info.get("Pages") or 0)
+                except Exception:
+                    total_pages = 0
+                page_files = [f"page_{i:03}.png" for i in range(1, max(total_pages, 0) + 1)]
+            report("processing", "text_extraction", 45, pages=len(page_files), ocr_backend=OCR_BACKEND)
+
+        account_name = None
+        account_number = None
+        account_name_bbox = None
+        account_number_bbox = None
+        for layout in layout_pages[:5]:
+            text = (layout or {}).get("text", "")
+            if not text:
+                continue
+            profile = detect_bank_profile(text)
+            account_identity = extract_account_identity(text, profile)
+            if not account_name:
+                account_name = account_identity.get("account_name")
+            if not account_number:
+                account_number = account_identity.get("account_number")
+            if account_name and account_number:
+                break
+
         diagnostics: Dict[str, Dict] = {
             "job": {
                 "ocr_backend": OCR_BACKEND,
+                "parse_mode": parse_mode,
                 "pages": len(page_files),
                 "text_extract_error": text_extract_error,
+                "account_name": account_name,
+                "account_number": account_number,
+                "account_name_bbox": account_name_bbox,
+                "account_number_bbox": account_number_bbox,
             },
             "pages": {},
         }
 
-        cleaned_files = sorted(os.listdir(cleaned_dir))
-        for idx, page_file in enumerate(cleaned_files, start=1):
+        for idx, page_file in enumerate(page_files, start=1):
             page_name = page_file.replace(".png", "")
             page_path = os.path.join(cleaned_dir, page_file)
 
             report(
                 "processing",
-                "page_ocr",
-                46 + int((idx / max(len(cleaned_files), 1)) * 48),
-                pages=len(cleaned_files),
+                "page_ocr" if parse_mode == "ocr" else "page_text",
+                46 + int((idx / max(len(page_files), 1)) * 48),
+                pages=len(page_files),
                 page=page_name,
                 ocr_backend=OCR_BACKEND,
             )
 
-            img = cv2.imread(page_path)
-            if img is None:
-                parsed_output[page_name] = []
-                bounds_output[page_name] = []
-                diagnostics["pages"][page_name] = {
-                    "source_type": "none",
-                    "ocr_backend": OCR_BACKEND,
-                    "fallback_reason": "image_read_failed",
-                    "rows_parsed": 0,
-                }
-                with open(os.path.join(ocr_dir, f"{page_name}.json"), "w") as f:
-                    json.dump([], f, indent=2)
-                continue
-
-            page_h, page_w = img.shape[:2]
             layout = layout_pages[idx - 1] if idx - 1 < len(layout_pages) else None
             profile_text = layout.get("text") if layout else ""
             profile = detect_bank_profile(profile_text)
 
             ocr_items = []
-            source_type = "text"
+            source_type = "ocr" if parse_mode == "ocr" else "text"
+            source_reason = None
             parser_words = layout.get("words", []) if layout else []
-            parser_w = layout.get("width", page_w) if layout else page_w
-            parser_h = layout.get("height", page_h) if layout else page_h
+            parser_w = float(layout.get("width", 1)) if layout else 1.0
+            parser_h = float(layout.get("height", 1)) if layout else 1.0
+            page_w = int(parser_w) if parser_w > 1 else 1
+            page_h = int(parser_h) if parser_h > 1 else 1
 
-            page_rows, page_bounds, parser_diag = parse_page_with_profile_fallback(
-                parser_words,
-                parser_w,
-                parser_h,
-                profile,
-            )
-            if not page_rows:
-                source_type = "ocr"
+            if parse_mode == "ocr":
+                img = cv2.imread(page_path)
+                if img is None:
+                    img = _ensure_cleaned_page(input_pdf, page_path, os.path.join(pages_dir, page_file), idx)
+                if img is None:
+                    parsed_output[page_name] = []
+                    bounds_output[page_name] = []
+                    diagnostics["pages"][page_name] = {
+                        "source_type": "none",
+                        "ocr_backend": OCR_BACKEND,
+                        "fallback_reason": "image_read_failed",
+                        "rows_parsed": 0,
+                    }
+                    with open(os.path.join(ocr_dir, f"{page_name}.json"), "w") as f:
+                        json.dump([], f, indent=2)
+                    continue
+                page_h, page_w = img.shape[:2]
                 ocr_items = ocr_image(page_path, backend=OCR_BACKEND)
                 ocr_words = _ocr_items_to_words(ocr_items)
+                ocr_text = " ".join((item.get("text") or "") for item in ocr_items)
+                profile = detect_bank_profile(ocr_text or profile_text)
+                if not account_name or not account_number:
+                    account_identity = extract_account_identity(ocr_text, profile)
+                    if not account_name:
+                        account_name = account_identity.get("account_name")
+                    if not account_number:
+                        account_number = account_identity.get("account_number")
+                if not account_name_bbox and account_name:
+                    account_name_bbox = find_value_bounds(ocr_words, page_w, page_h, account_name, page_name)
+                if not account_number_bbox and account_number:
+                    account_number_bbox = find_value_bounds(ocr_words, page_w, page_h, account_number, page_name)
                 page_rows, page_bounds, parser_diag = parse_page_with_profile_fallback(
                     ocr_words,
                     page_w,
                     page_h,
                     profile,
                 )
+            else:
+                if not account_name or not account_number:
+                    account_identity = extract_account_identity(profile_text, profile)
+                    if not account_name:
+                        account_name = account_identity.get("account_name")
+                    if not account_number:
+                        account_number = account_identity.get("account_number")
+                if not account_name_bbox and account_name:
+                    account_name_bbox = find_value_bounds(parser_words, parser_w, parser_h, account_name, page_name)
+                if not account_number_bbox and account_number:
+                    account_number_bbox = find_value_bounds(parser_words, parser_w, parser_h, account_number, page_name)
+                page_rows, page_bounds, parser_diag = parse_page_with_profile_fallback(
+                    parser_words,
+                    parser_w,
+                    parser_h,
+                    profile,
+                )
+
+            transaction_rows = [row for row in page_rows if is_transaction_row(row, profile)]
+            id_map: Dict[str, str] = {}
+            for n, row in enumerate(transaction_rows, start=1):
+                old_id = str(row.get("row_id") or "")
+                new_id = f"{n:03}"
+                row["row_id"] = new_id
+                id_map[old_id] = new_id
+
+            filtered_bounds = []
+            for b in page_bounds:
+                old_id = str(b.get("row_id") or "")
+                if old_id not in id_map:
+                    continue
+                b["row_id"] = id_map[old_id]
+                filtered_bounds.append(b)
 
             filtered_rows = []
-            for row in page_rows:
+            for row in transaction_rows:
                 filtered_rows.append(
                     {
                         "row_id": row.get("row_id"),
@@ -264,23 +336,29 @@ def process_pdf(job_id: str):
                 )
 
             parsed_output[page_name] = filtered_rows
-            bounds_output[page_name] = page_bounds
+            bounds_output[page_name] = filtered_bounds
             diagnostics["pages"][page_name] = {
                 "source_type": source_type,
                 "ocr_backend": OCR_BACKEND,
+                "parse_mode": parse_mode,
                 "bank_profile": profile.name,
                 "ocr_items": len(ocr_items),
                 "rows_parsed": len(filtered_rows),
                 "profile_detected": parser_diag.get("profile_detected", profile.name),
                 "profile_selected": parser_diag.get("profile_selected", profile.name),
                 "fallback_applied": bool(parser_diag.get("fallback_applied", False)),
-                "fallback_reason": parser_diag.get("fallback_reason"),
+                "fallback_reason": parser_diag.get("fallback_reason") or source_reason,
             }
+
+            diagnostics["job"]["account_name"] = account_name
+            diagnostics["job"]["account_number"] = account_number
+            diagnostics["job"]["account_name_bbox"] = account_name_bbox
+            diagnostics["job"]["account_number_bbox"] = account_number_bbox
 
             with open(os.path.join(ocr_dir, f"{page_name}.json"), "w") as f:
                 json.dump(ocr_items, f, indent=2)
 
-        report("processing", "saving_results", 95, pages=len(pages), ocr_backend=OCR_BACKEND)
+        report("processing", "saving_results", 95, pages=len(page_files), ocr_backend=OCR_BACKEND)
 
         with open(os.path.join(result_dir, "parsed_rows.json"), "w") as f:
             json.dump(parsed_output, f, indent=2)
@@ -289,9 +367,9 @@ def process_pdf(job_id: str):
         with open(os.path.join(result_dir, "parse_diagnostics.json"), "w") as f:
             json.dump(diagnostics, f, indent=2)
 
-        report("done", "completed", 100, pages=len(pages), ocr_backend=OCR_BACKEND)
+        report("done", "completed", 100, pages=len(page_files), ocr_backend=OCR_BACKEND)
         print(f"[WORKER] Finished job {job_id}")
-        return {"pages": len(pages)}
+        return {"pages": len(page_files)}
     except Exception as exc:
         update_status(
             job_dir,
@@ -299,6 +377,7 @@ def process_pdf(job_id: str):
             step="failed",
             progress=last_progress,
             message=str(exc),
+            parse_mode=parse_mode,
             ocr_backend=OCR_BACKEND,
         )
         print(f"[WORKER] Failed job {job_id}: {exc}")
@@ -315,6 +394,10 @@ def update_status(job_dir, status, **extra):
         json.dump(data, f)
 
     os.replace(tmp_path, final_path)
+
+
+def _normalize_parse_mode(mode: str | None) -> str:
+    return "ocr" if str(mode or "").strip().lower() == "ocr" else "text"
 
 
 def _ocr_items_to_words(ocr_items: List[Dict]) -> List[Dict]:
@@ -398,6 +481,25 @@ def _render_pdf_pages(
             ocr_backend=OCR_BACKEND,
         )
     return total_pages
+
+
+def _ensure_cleaned_page(input_pdf: str, cleaned_path: str, raw_path: str, page_num: int):
+    try:
+        page_list = convert_from_path(
+            input_pdf,
+            dpi=PREVIEW_DPI,
+            fmt="png",
+            first_page=page_num,
+            last_page=page_num,
+        )
+        if not page_list:
+            return None
+        _save_preview_page(page_list[0], raw_path)
+        cleaned = clean_page(raw_path)
+        cv2.imwrite(cleaned_path, cleaned)
+        return cv2.imread(cleaned_path)
+    except Exception:
+        return None
 
 
 def _save_preview_page(page: Image.Image, page_path: str):

@@ -1,5 +1,4 @@
 import cv2
-import numpy as np
 
 def clean_page(image_path):
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
