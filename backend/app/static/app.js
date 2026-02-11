@@ -164,7 +164,7 @@ finishSave.addEventListener('click', () => {
 });
 
 downloadCSV.addEventListener('click', () => {
-  // Export to PDF is intentionally not wired yet.
+  exportToPdf();
 });
 
 prevPageBtn.addEventListener('click', () => {
@@ -1511,12 +1511,15 @@ function updateSummaryFromRows(rows) {
 
 function renderMonthlySummary(rows) {
   const monthlySummaryBody = document.getElementById('monthlySummaryBody');
+  const monthlySummaryWrap = document.querySelector('.monthly-summary-wrap');
   if (!monthlySummaryBody) return;
   const monthly = computeMonthlySummary(rows);
   if (!monthly.length) {
+    if (monthlySummaryWrap) monthlySummaryWrap.classList.add('is-empty');
     monthlySummaryBody.innerHTML = '<tr><td class="monthly-empty" colspan="4">No monthly data</td></tr>';
     return;
   }
+  if (monthlySummaryWrap) monthlySummaryWrap.classList.remove('is-empty');
   monthlySummaryBody.innerHTML = monthly.map((item) => (
     `<tr>
       <td>${escapeHtml(item.monthLabel)}</td>
@@ -1759,6 +1762,195 @@ async function safeParseJson(res) {
   } catch (e) {
     return null;
   }
+}
+
+function exportToPdf() {
+  if (!parsedRows.length) {
+    alert('No extracted rows to export yet.');
+    return;
+  }
+
+  if (!window.jspdf || typeof window.jspdf.jsPDF !== 'function') {
+    alert('PDF library is not loaded.');
+    return;
+  }
+
+  const doc = new window.jspdf.jsPDF({
+    orientation: 'portrait',
+    unit: 'pt',
+    format: 'a4'
+  });
+
+  const marginLeft = 40;
+  let y = 42;
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(14);
+  doc.text('Account Summary', marginLeft, y);
+  y += 16;
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  const generatedAt = new Date();
+  doc.text(
+    `Generated: ${generatedAt.toLocaleDateString()} ${generatedAt.toLocaleTimeString()}`,
+    marginLeft,
+    y
+  );
+  y += 14;
+
+  const summaryRows = [
+    ['Account Name', pdfSafeText((accountNameSummary && accountNameSummary.textContent ? accountNameSummary.textContent : '-').trim())],
+    ['Account Number', pdfSafeText((accountNumberSummary && accountNumberSummary.textContent ? accountNumberSummary.textContent : '-').trim())],
+    ['Total Transactions', pdfSafeText((totalTransactions && totalTransactions.textContent ? totalTransactions.textContent : '0').trim())],
+    ['Debit Transactions', pdfSafeText((totalDebitTransactions && totalDebitTransactions.textContent ? totalDebitTransactions.textContent : '0').trim())],
+    ['Credit Transactions', pdfSafeText((totalCreditTransactions && totalCreditTransactions.textContent ? totalCreditTransactions.textContent : '0').trim())],
+    ['Average Daily Balance (ADB)', formatPdfMoneyPlain(endingBalance && endingBalance.textContent ? endingBalance.textContent : '-')]
+  ];
+
+  if (typeof doc.autoTable === 'function') {
+    doc.autoTable({
+      startY: y,
+      theme: 'grid',
+      margin: { left: marginLeft, right: 40 },
+      head: [[{ content: 'Account Summary', colSpan: 2, styles: { halign: 'left' } }]],
+      body: summaryRows,
+      styles: { font: 'helvetica', fontSize: 9, cellPadding: 5 },
+      headStyles: { fillColor: [245, 246, 250], textColor: [33, 37, 41], fontStyle: 'bold' },
+      columnStyles: { 0: { cellWidth: 180 } }
+    });
+    y = doc.lastAutoTable.finalY + 16;
+  } else {
+    summaryRows.forEach(([label, value]) => {
+      doc.text(`${label}: ${value}`, marginLeft, y);
+      y += 12;
+    });
+    y += 8;
+  }
+
+  const monthly = computeMonthlySummary(parsedRows);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.text('Monthly Summary', marginLeft, y);
+  y += 8;
+
+  const monthlyRows = monthly.length
+    ? monthly.map((item) => ([
+      pdfSafeText(item.monthLabel),
+      formatPdfMoney(item.debit, true),
+      formatPdfMoney(item.credit, true),
+      formatPdfMoney(item.adb, true),
+    ]))
+    : [['No monthly data', '-', '-', '-']];
+
+  if (typeof doc.autoTable === 'function') {
+    doc.autoTable({
+      startY: y,
+      theme: 'grid',
+      margin: { left: marginLeft, right: 40 },
+      head: [['Month', 'Debit', 'Credit', 'ADB']],
+      body: monthlyRows,
+      styles: { font: 'helvetica', fontSize: 8.5, cellPadding: 4 },
+      headStyles: { fillColor: [245, 246, 250], textColor: [33, 37, 41], fontStyle: 'bold' },
+      columnStyles: {
+        0: { cellWidth: 145 },
+        1: { cellWidth: 123, halign: 'right' },
+        2: { cellWidth: 123, halign: 'right' },
+        3: { cellWidth: 124, halign: 'right' }
+      }
+    });
+    y = doc.lastAutoTable.finalY + 16;
+  } else {
+    monthlyRows.forEach(([month, debit, credit, adb]) => {
+      doc.text(`${month}: ${debit} / ${credit} / ${adb}`, marginLeft, y);
+      y += 12;
+    });
+    y += 8;
+  }
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(12);
+  doc.text('Transactions', marginLeft, y);
+  y += 10;
+
+  const tableRows = parsedRows.map((row, idx) => ([
+    String(row.global_row_id || row.row_id || idx + 1),
+    pdfSafeText(getDisplayValue(row, 'date') || ''),
+    pdfSafeText(getDisplayValue(row, 'description') || ''),
+    formatPdfMoney(getDisplayValue(row, 'debit') || ''),
+    formatPdfMoney(getDisplayValue(row, 'credit') || ''),
+    formatPdfMoney(getDisplayValue(row, 'balance') || '')
+  ]));
+
+  if (typeof doc.autoTable === 'function') {
+    doc.autoTable({
+      startY: y,
+      theme: 'grid',
+      margin: { left: marginLeft, right: 40 },
+      head: [['#', 'Date', 'Description', 'Debit', 'Credit', 'Balance']],
+      body: tableRows,
+      styles: { font: 'helvetica', fontSize: 8.5, cellPadding: 4, overflow: 'linebreak' },
+      headStyles: { fillColor: [245, 246, 250], textColor: [33, 37, 41], fontStyle: 'bold' },
+      columnStyles: {
+        0: { cellWidth: 34, halign: 'center' },
+        1: { cellWidth: 70 },
+        2: { cellWidth: 170 },
+        3: { cellWidth: 78, halign: 'right' },
+        4: { cellWidth: 78, halign: 'right' },
+        5: { cellWidth: 88, halign: 'right' }
+      }
+    });
+  } else {
+    const fallbackLines = tableRows.map((cols) => cols.join(' | '));
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    fallbackLines.forEach((line) => {
+      if (y > 780) {
+        doc.addPage();
+        y = 42;
+      }
+      doc.text(line, marginLeft, y);
+      y += 10;
+    });
+  }
+
+  doc.save(buildPdfFileName());
+}
+
+function buildPdfFileName() {
+  const raw = selectedFile && selectedFile.name ? selectedFile.name : 'statement';
+  const base = raw.replace(/\.pdf$/i, '').replace(/[^a-zA-Z0-9-_]+/g, '_').replace(/^_+|_+$/g, '');
+  return `${base || 'statement'}_export.pdf`;
+}
+
+function formatPdfMoney(value, absolute = false) {
+  const n = typeof value === 'number' ? value : normalizeAmount(String(value || ''));
+  if (!Number.isFinite(n)) return pdfSafeText(String(value || '-').trim() || '-');
+  const formatted = new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Math.abs(n));
+  const sign = absolute ? '' : (n < 0 ? '-' : '');
+  return `${sign}${formatted}`;
+}
+
+function formatPdfMoneyPlain(value, absolute = false) {
+  const n = typeof value === 'number' ? value : normalizeAmount(String(value || ''));
+  if (!Number.isFinite(n)) return pdfSafeText(String(value || '-').trim() || '-');
+  const formatted = new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Math.abs(n));
+  const sign = absolute ? '' : (n < 0 ? '-' : '');
+  return `${sign}${formatted}`;
+}
+
+function pdfSafeText(value) {
+  return String(value || '')
+    .replace(/₱/g, 'PHP ')
+    .replace(/[^\x20-\x7E\n\r\t]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function sleep(ms) {
