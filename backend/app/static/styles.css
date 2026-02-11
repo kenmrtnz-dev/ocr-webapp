@@ -52,6 +52,1045 @@ header {
     border-radius: 12px;
 }
 
+.workflow-shell {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 8px;
+    display: grid;
+    gap: 8px;
+}
+
+.auth-row {
+    display: flex;
+    align-items: center;
+}
+
+.auth-controls {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.login-page {
+    padding: 0;
+    background: #eef1f4;
+}
+
+.login-shell {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 20px;
+}
+
+.login-stage {
+    width: 100%;
+    min-height: 100%;
+    border: 0;
+    background: transparent;
+    border-radius: 0;
+    display: grid;
+    place-items: center;
+    padding: 0;
+}
+
+.login-card {
+    width: min(92vw, 440px);
+    background: #ffffff;
+    border: 1px solid #dee4e0;
+    border-radius: 24px;
+    box-shadow: 0 16px 34px rgba(26, 38, 33, 0.08);
+    padding: 30px 26px 24px;
+    display: grid;
+    gap: 12px;
+    z-index: 1;
+}
+
+.login-brand {
+    font-size: 0.8rem;
+    font-weight: 800;
+    color: #166247;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    text-align: center;
+}
+
+.login-title {
+    font-size: 1.65rem;
+    font-weight: 800;
+    color: #16382b;
+    line-height: 1.1;
+    text-align: center;
+    letter-spacing: -0.02em;
+}
+
+.login-subtitle {
+    color: #607069;
+    font-size: 0.9rem;
+    text-align: center;
+}
+
+.login-form {
+    display: grid;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+.login-form input {
+    height: 44px;
+    border: 1px solid #d8dfdb;
+    border-radius: 10px;
+    padding: 0 12px;
+    font-family: 'Manrope', sans-serif;
+    font-size: 0.9rem;
+    color: #1f2937;
+    outline: none;
+    background: #f9fbfa;
+}
+
+.login-password-wrap {
+    position: relative;
+}
+
+.login-password-wrap input {
+    width: 100%;
+    padding-right: 62px;
+}
+
+.login-password-toggle {
+    position: absolute;
+    top: 50%;
+    right: 8px;
+    transform: translateY(-50%);
+    height: 28px;
+    min-width: 50px;
+    border: 1px solid #d4dfda;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #416257;
+    font-family: 'Manrope', sans-serif;
+    font-size: 0.74rem;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.login-password-toggle:hover {
+    background: #f4faf7;
+}
+
+.login-form input:focus {
+    border-color: #b6d5c8;
+    box-shadow: 0 0 0 2px #e8f5ef;
+    background: #ffffff;
+}
+
+.login-submit {
+    margin-top: 8px;
+    height: 44px;
+    width: 100%;
+    font-size: 0.9rem;
+    font-weight: 700;
+    border-radius: 10px;
+    border-color: #c8d9d2;
+    background: #ecf6f1;
+    color: #1c5d45;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.login-submit:disabled {
+    opacity: 0.7;
+    cursor: default;
+}
+
+.login-message {
+    font-size: 0.74rem;
+    color: #6b7a74;
+    text-align: center;
+}
+
+.login-message.is-error {
+    color: #9a3b44;
+}
+
+.login-message.is-info {
+    color: #2b6650;
+}
+
+@media (max-width: 980px) {
+    .login-stage {
+        width: 100%;
+        min-height: 100%;
+        padding: 0;
+    }
+}
+
+@media (max-width: 700px) {
+    .login-shell {
+        padding: 14px;
+    }
+
+    .login-stage {
+        width: 100%;
+        padding: 16px;
+    }
+
+    .login-card {
+        width: 100%;
+        padding: 20px 14px;
+    }
+
+    .login-title {
+        font-size: 1.35rem;
+    }
+}
+
+.workflow-route-links {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-right: 6px;
+}
+
+.workflow-route-link {
+    text-decoration: none;
+    border: 1px solid #d6e0db;
+    color: #3a4a44;
+    font-size: 0.68rem;
+    line-height: 1;
+    padding: 4px 7px;
+    border-radius: 999px;
+    background: #fff;
+}
+
+.workflow-route-link.is-active {
+    border-color: #b3cdc2;
+    color: #155c44;
+    background: #edf7f3;
+    font-weight: 700;
+}
+
+.auth-controls input {
+    height: 28px;
+    border: 1px solid #d6e0db;
+    border-radius: 6px;
+    padding: 0 8px;
+    font-family: 'Manrope', sans-serif;
+    font-size: 0.72rem;
+}
+
+.auth-user-badge {
+    margin-left: auto;
+    font-size: 0.72rem;
+    color: #475569;
+    background: #f5f8f7;
+    border: 1px solid #dbe4df;
+    border-radius: 999px;
+    padding: 3px 8px;
+}
+
+.workflow-panel {
+    border: 1px solid #dde5e1;
+    border-radius: 10px;
+    padding: 7px;
+    display: grid;
+    gap: 7px;
+}
+
+.workflow-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.workflow-panel-head h3 {
+    font-size: 0.78rem;
+}
+
+.workflow-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.workflow-actions input[type="text"],
+.workflow-actions input[type="file"] {
+    height: 28px;
+    border: 1px solid #d6e0db;
+    border-radius: 6px;
+    padding: 0 8px;
+    font-family: 'Manrope', sans-serif;
+    font-size: 0.72rem;
+}
+
+.agent-upload-card {
+    border: 1px solid #e4ebf1;
+    border-radius: 14px;
+    background: #fbfdff;
+    padding: 10px;
+    display: grid;
+    grid-template-columns: minmax(220px, 300px) minmax(260px, 1fr);
+    gap: 12px;
+}
+
+.agent-drop-zone {
+    border: 2px dashed #c8d8ec;
+    border-radius: 12px;
+    background: #f8fbff;
+    min-height: 200px;
+    display: grid;
+    place-items: center;
+    align-content: center;
+    gap: 8px;
+    text-align: center;
+    padding: 14px;
+}
+
+.agent-drop-zone.dragover {
+    border-color: #8fb2e8;
+    background: #eef5ff;
+}
+
+.agent-drop-zone i {
+    font-size: 1.35rem;
+    color: #2d73da;
+}
+
+.agent-drop-zone p {
+    font-size: 0.86rem;
+    font-weight: 700;
+    color: #1f2937;
+}
+
+.agent-drop-zone span {
+    font-size: 0.78rem;
+    color: #64748b;
+}
+
+.agent-drop-zone small {
+    font-size: 0.68rem;
+    color: #7b8ba0;
+}
+
+.agent-uploaded-list-wrap {
+    display: grid;
+    grid-template-rows: auto 1fr;
+    gap: 6px;
+    min-height: 200px;
+}
+
+.agent-uploaded-list-wrap h4 {
+    font-size: 0.88rem;
+    color: #1f2937;
+    font-weight: 800;
+    margin: 0;
+}
+
+.agent-selected-files {
+    border: 1px solid #e6edf4;
+    border-radius: 10px;
+    background: #ffffff;
+    padding: 6px;
+    display: grid;
+    gap: 4px;
+    overflow: auto;
+    max-height: 198px;
+}
+
+.agent-files-empty {
+    color: #7d8da2;
+    font-size: 0.74rem;
+    display: grid;
+    place-items: center;
+    min-height: 100%;
+}
+
+.agent-file-item {
+    display: grid;
+    grid-template-columns: 18px 1fr auto;
+    align-items: center;
+    gap: 8px;
+    min-height: 28px;
+    border: 1px solid #edf2f7;
+    border-radius: 8px;
+    background: #fbfdff;
+    padding: 4px 6px;
+}
+
+.agent-file-item i {
+    color: #2d73da;
+    font-size: 0.92rem;
+}
+
+.agent-file-meta {
+    min-width: 0;
+}
+
+.agent-file-name {
+    font-size: 0.72rem;
+    color: #1f2937;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.agent-file-size {
+    font-size: 0.66rem;
+    color: #7d8da2;
+}
+
+.agent-file-remove {
+    border: none;
+    background: transparent;
+    color: #c05656;
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 3px;
+}
+
+.agent-upload-fields {
+    margin-bottom: 8px;
+    display: grid;
+    grid-template-columns: minmax(200px, 1fr) minmax(200px, 1fr);
+    gap: 8px;
+}
+
+.agent-upload-submit-row {
+    display: grid;
+    grid-template-columns: auto minmax(220px, 1fr);
+    justify-content: stretch;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+    margin-bottom: 8px;
+}
+
+.agent-submit-btn {
+    min-width: 132px;
+    height: 34px;
+    border-radius: 10px;
+    border: 1px solid #bcd2c8;
+    background: #e8f5ef;
+    color: #16553f;
+    font-size: 0.78rem;
+    font-weight: 800;
+    letter-spacing: 0.01em;
+}
+
+.agent-submit-btn:hover {
+    background: #dff1e8;
+}
+
+.agent-submit-btn.is-loading {
+    cursor: wait;
+}
+
+.agent-submit-btn.is-loading::after {
+    content: '';
+    width: 12px;
+    height: 12px;
+    margin-left: 7px;
+    border-radius: 999px;
+    border: 2px solid #8fb9a7;
+    border-top-color: #1c5d45;
+    animation: agent-spin 0.8s linear infinite;
+}
+
+@keyframes agent-spin {
+    to { transform: rotate(360deg); }
+}
+
+.agent-upload-progress-wrap {
+    width: 100%;
+    min-width: 0;
+}
+
+.agent-upload-progress-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: #55657a;
+    font-size: 0.67rem;
+    margin-bottom: 4px;
+}
+
+.agent-upload-progress-track {
+    width: 100%;
+    height: 7px;
+    border-radius: 999px;
+    background: #e7edf5;
+    overflow: hidden;
+}
+
+.agent-upload-progress-fill {
+    width: 0%;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #8db8f0 0%, #4d83d8 100%);
+    transition: width 0.15s ease;
+}
+
+.admin-user-form {
+    display: grid;
+    grid-template-columns: minmax(220px, 1.25fr) minmax(180px, 1fr) minmax(170px, 0.9fr) minmax(150px, 0.8fr);
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.admin-user-form input,
+.admin-user-form select {
+    height: 34px;
+    border: 1px solid #d8e1ea;
+    border-radius: 8px;
+    padding: 0 10px;
+    background: #f7f9fc;
+    color: #334155;
+    font-family: 'Manrope', sans-serif;
+    font-size: 0.74rem;
+}
+
+.admin-user-form .preview-nav,
+.admin-danger-btn {
+    height: 34px;
+    min-width: 0;
+    width: 100%;
+    padding: 0 12px;
+    border-radius: 10px;
+    border: 1px solid #c8d9d2;
+    background: #ecf6f1;
+    color: #1c5d45;
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.admin-user-form .preview-nav:hover,
+.admin-danger-btn:hover {
+    background: #e3f2eb;
+    border-color: #bed3ca;
+    color: #1b5842;
+}
+
+.admin-users-grid {
+    table-layout: fixed;
+}
+
+.admin-users-grid th:nth-child(1),
+.admin-users-grid td:nth-child(1) { width: 14%; }
+.admin-users-grid th:nth-child(2),
+.admin-users-grid td:nth-child(2) { width: 34%; }
+.admin-users-grid th:nth-child(3),
+.admin-users-grid td:nth-child(3) { width: 16%; }
+.admin-users-grid th:nth-child(4),
+.admin-users-grid td:nth-child(4) { width: 14%; }
+.admin-users-grid th:nth-child(5),
+.admin-users-grid td:nth-child(5) { width: 26%; }
+
+.admin-danger-zone {
+    border: 1px solid #f0d6d9;
+    background: #fff8f8;
+    border-radius: 10px;
+    padding: 10px;
+    display: grid;
+    gap: 8px;
+}
+
+.admin-danger-text {
+    margin: 0;
+    font-size: 0.74rem;
+    color: #6b4350;
+    margin-bottom: 8px;
+}
+
+.admin-danger-btn {
+    max-width: 240px;
+    align-self: start;
+}
+
+.admin-danger-btn:hover {
+    background: #e3f2eb;
+}
+
+.admin-danger-msg {
+    margin: 0;
+    min-height: 16px;
+    font-size: 0.72rem;
+    color: #475569;
+}
+
+body[data-page-role="admin"] .workflow-shell {
+    grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
+    align-items: start;
+}
+
+@media (max-width: 980px) {
+    body[data-page-role="admin"] .workflow-shell {
+        grid-template-columns: 1fr;
+    }
+
+    .admin-user-form {
+        grid-template-columns: 1fr;
+    }
+}
+
+body[data-page-role="admin"] .admin-user-form .preview-nav,
+body[data-page-role="admin"] .admin-danger-btn.preview-nav {
+    height: 34px;
+    min-width: 0;
+    width: 100%;
+    padding: 0 12px;
+    border-radius: 10px;
+    border: 1px solid #c8d9d2;
+    background: #ecf6f1;
+    color: #1c5d45;
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+body[data-page-role="admin"] .admin-user-form .preview-nav:hover,
+body[data-page-role="admin"] .admin-danger-btn.preview-nav:hover {
+    background: #e3f2eb;
+    border-color: #bed3ca;
+    color: #1b5842;
+}
+
+body[data-page-role="admin"] .admin-danger-btn.preview-nav {
+    width: min(320px, 100%);
+    max-width: 320px;
+    margin: 0 auto;
+}
+
+.admin-users-grid td:nth-child(5),
+.admin-users-grid td.workflow-item-actions {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: nowrap;
+}
+
+.agent-submissions-table-wrap {
+    border: 1px solid #e4ebf1;
+    border-radius: 12px;
+    background: #ffffff;
+    padding: 8px;
+    margin-top: 4px;
+}
+
+.agent-submissions-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.agent-submissions-table-title {
+    font-size: 0.82rem;
+    font-weight: 800;
+    color: #1f2937;
+    margin: 0;
+}
+
+.agent-submissions-search {
+    height: 30px;
+    width: min(100%, 280px);
+    border: 1px solid #d8e1ea;
+    border-radius: 8px;
+    padding: 0 10px;
+    background: #f7f9fc;
+    color: #334155;
+    font-family: 'Manrope', sans-serif;
+    font-size: 0.74rem;
+}
+
+.agent-submissions-table {
+    overflow: hidden;
+    max-height: none;
+    border: 1px solid #e9eef4;
+    border-radius: 8px;
+    min-height: 554px;
+}
+
+.agent-submissions-table table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 0;
+    font-size: 0.72rem;
+}
+
+.agent-submissions-grid {
+    table-layout: fixed;
+}
+
+.agent-submissions-grid-agent th:nth-child(1),
+.agent-submissions-grid-agent td:nth-child(1) { width: 11%; }
+.agent-submissions-grid-agent th:nth-child(2),
+.agent-submissions-grid-agent td:nth-child(2) { width: 24%; }
+.agent-submissions-grid-agent th:nth-child(3),
+.agent-submissions-grid-agent td:nth-child(3) { width: 23%; }
+.agent-submissions-grid-agent th:nth-child(4),
+.agent-submissions-grid-agent td:nth-child(4) { width: 18%; }
+.agent-submissions-grid-agent th:nth-child(5),
+.agent-submissions-grid-agent td:nth-child(5) { width: 24%; }
+
+.agent-submissions-grid-evaluator th:nth-child(1),
+.agent-submissions-grid-evaluator td:nth-child(1) { width: 9%; }
+.agent-submissions-grid-evaluator th:nth-child(2),
+.agent-submissions-grid-evaluator td:nth-child(2) { width: 14%; }
+.agent-submissions-grid-evaluator th:nth-child(3),
+.agent-submissions-grid-evaluator td:nth-child(3) { width: 16%; }
+.agent-submissions-grid-evaluator th:nth-child(4),
+.agent-submissions-grid-evaluator td:nth-child(4) { width: 13%; }
+.agent-submissions-grid-evaluator th:nth-child(5),
+.agent-submissions-grid-evaluator td:nth-child(5) { width: 20%; }
+.agent-submissions-grid-evaluator th:nth-child(6),
+.agent-submissions-grid-evaluator td:nth-child(6) { width: 10%; }
+.agent-submissions-grid-evaluator th:nth-child(7),
+.agent-submissions-grid-evaluator td:nth-child(7) { width: 18%; }
+
+.agent-submissions-table thead th {
+    text-align: left;
+    font-weight: 700;
+    color: #475569;
+    background: #f7f9fc;
+    border-bottom: 1px solid #e4ebf2;
+    padding: 7px 8px;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    height: 34px;
+    line-height: 1.1;
+    vertical-align: middle;
+}
+
+.agent-submissions-table tbody td {
+    border-bottom: 1px solid #eef3f7;
+    color: #1f2937;
+    padding: 7px 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    height: 34px;
+    line-height: 1.1;
+    vertical-align: middle;
+}
+
+.agent-submissions-table tbody tr {
+    height: 34px;
+}
+
+.agent-submissions-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.agent-submissions-table tbody tr.agent-row-filler td {
+    height: 34px;
+    border-bottom: 1px solid #eef3f7;
+    background: #ffffff;
+    padding: 0;
+}
+
+.agent-submissions-table td .workflow-item-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: nowrap;
+    white-space: nowrap;
+}
+
+.agent-submissions-grid-evaluator td:nth-child(7) {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: nowrap;
+}
+
+.agent-submissions-grid-agent td:nth-child(5) {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: nowrap;
+}
+
+.agent-submissions-grid-evaluator td.workflow-item-actions {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: nowrap;
+}
+
+.agent-submission-id {
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.agent-submissions-table tbody td:nth-child(2) {
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.agent-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border-top: 1px solid #e9eef4;
+    background: #fbfdff;
+    padding: 6px 8px;
+}
+
+.agent-page-list {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    justify-content: center;
+}
+
+.agent-page-btn {
+    height: 24px;
+    min-width: 24px;
+    border: 1px solid #d7e1ea;
+    border-radius: 6px;
+    background: #fff;
+    color: #334155;
+    font-size: 0.68rem;
+    font-family: 'Manrope', sans-serif;
+    padding: 0 7px;
+    cursor: pointer;
+}
+
+.agent-page-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.agent-page-btn.is-active {
+    border-color: #bfcfe4;
+    background: #eaf2ff;
+    color: #1f3f68;
+    font-weight: 700;
+}
+
+@media (max-width: 980px) {
+    .agent-upload-card {
+        grid-template-columns: 1fr;
+    }
+
+    .agent-upload-fields {
+        grid-template-columns: 1fr;
+    }
+
+    .agent-upload-submit-row {
+        justify-content: stretch;
+        align-items: stretch;
+        flex-direction: column;
+        grid-template-columns: 1fr;
+    }
+
+    .agent-submit-btn {
+        width: 100%;
+    }
+
+    .agent-upload-progress-wrap {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .agent-submissions-table {
+        max-height: none;
+    }
+
+    .agent-submissions-toolbar {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .agent-submissions-search {
+        width: 100%;
+    }
+
+    .agent-pagination {
+        flex-wrap: wrap;
+    }
+}
+
+@media (max-width: 640px) {
+    .agent-upload-card {
+        padding: 8px;
+        gap: 8px;
+    }
+
+    .agent-drop-zone {
+        min-height: 170px;
+        padding: 10px;
+    }
+
+    .agent-drop-zone p {
+        font-size: 0.78rem;
+    }
+
+    .agent-drop-zone .browse-button {
+        width: 100%;
+        height: 34px;
+        border-radius: 10px;
+        font-size: 0.84rem;
+    }
+
+    .agent-upload-fields input[type="text"] {
+        height: 34px;
+        font-size: 0.78rem;
+    }
+
+    .agent-submit-btn {
+        height: 34px;
+        font-size: 0.78rem;
+    }
+
+    #agentSubmissionList.workflow-list {
+        max-height: 240px;
+    }
+}
+
+.workflow-list {
+    border: 1px solid #e3ebe7;
+    background: #fbfdfc;
+    min-height: 54px;
+    max-height: 180px;
+    overflow: auto;
+    padding: 6px;
+    display: grid;
+    gap: 4px;
+}
+
+.workflow-queue-head {
+    display: grid;
+    grid-template-columns: minmax(240px, 1.2fr) 0.6fr 0.45fr 0.55fr;
+    gap: 8px;
+    padding: 0 6px;
+    font-size: 0.64rem;
+    letter-spacing: 0.04em;
+    font-weight: 700;
+    color: #7a8983;
+    text-transform: uppercase;
+}
+
+.workflow-queue {
+    gap: 3px;
+}
+
+.workflow-queue-row {
+    border: 1px solid #dde5e1;
+    background: #fff;
+    border-radius: 6px;
+    min-height: 36px;
+    padding: 6px;
+    display: grid;
+    grid-template-columns: minmax(240px, 1.2fr) 0.6fr 0.45fr 0.55fr;
+    align-items: center;
+    gap: 8px;
+}
+
+.workflow-queue-col {
+    min-width: 0;
+    font-size: 0.7rem;
+    color: #1f2937;
+}
+
+.workflow-queue-col-title {
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.workflow-queue-col-job {
+    color: #64748b;
+}
+
+.workflow-status {
+    display: inline-flex;
+    align-items: center;
+    border: 1px solid #dce5e1;
+    background: #f8fbfa;
+    color: #2f433b;
+    border-radius: 999px;
+    font-size: 0.62rem;
+    font-weight: 700;
+    text-transform: lowercase;
+    letter-spacing: 0.02em;
+    line-height: 1;
+    padding: 3px 7px;
+}
+
+.workflow-status-processing {
+    border-color: #cfdcf5;
+    background: #f3f7ff;
+    color: #2f4f85;
+}
+
+.workflow-status-for-review {
+    border-color: #d9e0eb;
+    background: #f7f9fc;
+    color: #44566f;
+}
+
+.workflow-status-processed,
+.workflow-status-summary-ready,
+.workflow-status-summary-generated {
+    border-color: #b9daca;
+    background: #edf8f2;
+    color: #176345;
+}
+
+.workflow-status-failed {
+    border-color: #f0c7cb;
+    background: #fff3f4;
+    color: #943841;
+}
+
+.workflow-mini-btn {
+    height: 24px;
+    padding: 0 8px;
+    font-size: 0.67rem;
+}
+
+.workflow-item {
+    border: 1px solid #dde5e1;
+    background: #fff;
+    border-radius: 6px;
+    padding: 6px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 6px;
+    align-items: center;
+}
+
+.workflow-item-meta {
+    display: grid;
+    gap: 2px;
+}
+
+.workflow-item-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #1f2937;
+}
+
+.workflow-item-sub {
+    font-size: 0.68rem;
+    color: #64748b;
+}
+
+.workflow-item-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
 h1 {
     font-family: 'Manrope', sans-serif;
     font-size: 1.35rem;
@@ -527,6 +1566,12 @@ h3 {
     background: #f6fbf8;
 }
 
+.section-header-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
 .section-header h3 {
     font-size: 0.76rem;
 }
@@ -584,18 +1629,22 @@ h3 {
     min-height: 0;
     width: 100%;
     border-radius: 0;
+    border: 1px solid #d6ddd9;
+    background: #fff;
 }
 
 .table-header {
     display: grid;
-    grid-template-columns: 28px minmax(76px, 0.72fr) minmax(118px, 1.24fr) minmax(80px, 0.72fr) minmax(80px, 0.72fr) minmax(90px, 0.78fr) 76px;
-    column-gap: 8px;
-    padding: 5px 10px;
-    border-bottom: 1px solid var(--line-soft);
-    background: #f2f6f4;
-    color: #5d6d67;
-    font-size: 0.71rem;
-    font-weight: 600;
+    grid-template-columns: 40px minmax(76px, 0.72fr) minmax(118px, 1.24fr) minmax(80px, 0.72fr) minmax(80px, 0.72fr) minmax(90px, 0.78fr) 76px;
+    column-gap: 0;
+    padding: 0;
+    border-bottom: 1px solid #d6ddd9;
+    background: #eef2f0;
+    color: #42514c;
+    font-size: 0.61rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
 }
 
 .table-body {
@@ -608,27 +1657,48 @@ h3 {
 
 .table-row {
     display: grid;
-    grid-template-columns: 28px minmax(76px, 0.72fr) minmax(118px, 1.24fr) minmax(80px, 0.72fr) minmax(80px, 0.72fr) minmax(90px, 0.78fr) 76px;
-    column-gap: 8px;
-    padding: 7px 10px;
-    border-bottom: 1px solid #eef1f6;
+    grid-template-columns: 40px minmax(76px, 0.72fr) minmax(118px, 1.24fr) minmax(80px, 0.72fr) minmax(80px, 0.72fr) minmax(90px, 0.78fr) 76px;
+    column-gap: 0;
+    padding: 0;
+    border-bottom: 1px solid #e4eae7;
     align-items: center;
 }
 
 .table-row:hover {
-    background: #f1f8f5;
+    background: #f8fbfa;
 }
 
 .table-row.selected {
-    background: #e7f5ee;
+    background: #eef8f3;
 }
 
 .table-cell {
-    font-size: 0.71rem;
+    font-size: 0.61rem;
     font-family: 'Manrope', sans-serif;
     color: #253047;
-    padding: 1px 2px;
+    padding: 0;
     min-width: 0;
+    min-height: 28px;
+    border-right: 1px solid #e4eae7;
+    display: flex;
+    align-items: center;
+}
+
+.table-header .table-cell {
+    min-height: 30px;
+    padding: 0 8px;
+}
+
+.table-header .table-cell:first-child,
+.table-row .table-cell:first-child {
+    justify-content: center;
+    text-align: center;
+    padding: 0;
+}
+
+.table-header .table-cell:last-child,
+.table-row .table-cell:last-child {
+    border-right: none;
 }
 
 .table-empty {
@@ -640,20 +1710,23 @@ h3 {
 
 .table-input {
     width: 100%;
-    height: 25px;
-    border: 1px solid #d7dfdb;
-    border-radius: 6px;
-    background: #fff;
+    height: 28px;
+    border: none;
+    border-radius: 0;
+    background: transparent;
     color: #1f2937;
     font-family: 'Manrope', sans-serif;
-    font-size: 0.7rem;
-    padding: 0 6px;
+    font-size: 0.61rem;
+    padding: 0 8px;
 }
 
 .table-input:focus {
     outline: none;
-    border-color: #8dc7b2;
-    box-shadow: 0 0 0 2px rgba(31, 156, 114, 0.12);
+}
+
+.table-cell.active-cell {
+    background: #e9f6ef;
+    box-shadow: inset 0 0 0 1px #21a26f;
 }
 
 .table-input-credit,
@@ -665,7 +1738,8 @@ h3 {
 .table-actions {
     display: flex;
     justify-content: flex-end;
-    gap: 2px;
+    gap: 3px;
+    padding-right: 4px;
 }
 
 .row-actions-inline {
@@ -817,6 +1891,19 @@ h3 {
     height: 22px;
     justify-content: center;
     padding: 0;
+}
+
+/* Keep login CTA at the same scale as login inputs. */
+.login-form .login-submit {
+    height: 44px;
+    min-width: 0;
+    width: 100%;
+    padding: 0 12px;
+    font-size: 0.9rem;
+    border-radius: 10px;
+    background: #ecf6f1;
+    border: 1px solid #c8d9d2;
+    color: #1c5d45;
 }
 
 .preview-page-select {
@@ -1003,5 +2090,529 @@ h3 {
     .btn {
         width: 100%;
         justify-content: center;
+    }
+}
+
+/* Dashboard look-and-feel for role pages */
+body[data-page-role="agent"],
+body[data-page-role="credit_evaluator"],
+body[data-page-role="all"] {
+    background: #edf1f6;
+}
+
+body[data-page-role="agent"] .container,
+body[data-page-role="credit_evaluator"] .container,
+body[data-page-role="all"] .container {
+    width: min(97vw, 1440px);
+    border-radius: 18px;
+    border-color: #dfe5eb;
+    background: #f8fafc;
+    box-shadow: 0 20px 46px rgba(27, 37, 45, 0.08);
+}
+
+body[data-page-role="agent"] header,
+body[data-page-role="credit_evaluator"] header,
+body[data-page-role="all"] header {
+    border-radius: 12px;
+    border-color: #e4e9ef;
+    background: #ffffff;
+    justify-content: space-between;
+}
+
+body[data-page-role="agent"] header h1,
+body[data-page-role="credit_evaluator"] header h1,
+body[data-page-role="all"] header h1 {
+    font-size: 1.05rem;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    color: #162534;
+}
+
+.dashboard-header-tools {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.dashboard-search {
+    height: 32px;
+    min-width: min(42vw, 320px);
+    border: 1px solid #d8e1ea;
+    border-radius: 8px;
+    padding: 0 10px;
+    background: #f7f9fc;
+    color: #334155;
+    font-family: 'Manrope', sans-serif;
+    font-size: 0.76rem;
+}
+
+body[data-page-role="agent"] .workflow-shell,
+body[data-page-role="credit_evaluator"] .workflow-shell,
+body[data-page-role="all"] .workflow-shell {
+    border-radius: 14px;
+    border: 1px solid #e2e8ee;
+    background: #ffffff;
+    padding: 10px;
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 10px;
+    align-items: start;
+}
+
+body[data-page-role="agent"] .workflow-shell {
+    grid-template-columns: 1fr;
+}
+
+body[data-page-role="credit_evaluator"] .workflow-shell {
+    grid-template-columns: 1fr;
+}
+
+body[data-page-role="agent"] .auth-row,
+body[data-page-role="credit_evaluator"] .auth-row,
+body[data-page-role="all"] .auth-row {
+    grid-column: 1;
+    border: 1px solid #e3e9ef;
+    border-radius: 12px;
+    background: #f6f9fc;
+    padding: 10px 8px;
+}
+
+body[data-page-role="agent"] .auth-controls,
+body[data-page-role="credit_evaluator"] .auth-controls,
+body[data-page-role="all"] .auth-controls {
+    display: grid;
+    gap: 8px;
+    align-items: stretch;
+}
+
+body[data-page-role="agent"] .workflow-route-links,
+body[data-page-role="credit_evaluator"] .workflow-route-links,
+body[data-page-role="all"] .workflow-route-links {
+    display: grid;
+    gap: 6px;
+    margin: 0;
+}
+
+body[data-page-role="agent"] .workflow-route-link,
+body[data-page-role="credit_evaluator"] .workflow-route-link,
+body[data-page-role="all"] .workflow-route-link {
+    border-radius: 9px;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.72rem;
+    font-weight: 700;
+    border: 1px solid #d8e0e7;
+    background: #ffffff;
+    color: #334155;
+}
+
+body[data-page-role="agent"] .workflow-route-link.is-active,
+body[data-page-role="credit_evaluator"] .workflow-route-link.is-active,
+body[data-page-role="all"] .workflow-route-link.is-active {
+    border-color: #c5d6ef;
+    background: #eaf2ff;
+    color: #1f3f68;
+}
+
+body[data-page-role="agent"] #authEmail,
+body[data-page-role="agent"] #authPassword,
+body[data-page-role="agent"] #authLoginBtn,
+body[data-page-role="credit_evaluator"] #authEmail,
+body[data-page-role="credit_evaluator"] #authPassword,
+body[data-page-role="credit_evaluator"] #authLoginBtn,
+body[data-page-role="all"] #authEmail,
+body[data-page-role="all"] #authPassword,
+body[data-page-role="all"] #authLoginBtn {
+    display: none;
+}
+
+body[data-page-role="agent"] #authLogoutBtn,
+body[data-page-role="credit_evaluator"] #authLogoutBtn,
+body[data-page-role="all"] #authLogoutBtn {
+    width: 100%;
+    height: 30px;
+    border-radius: 9px;
+    border-color: #d4dde5;
+    background: #ffffff;
+    color: #334155;
+    font-size: 0.7rem;
+}
+
+body[data-page-role="agent"] .auth-user-badge,
+body[data-page-role="credit_evaluator"] .auth-user-badge,
+body[data-page-role="all"] .auth-user-badge {
+    margin: 0;
+    width: 100%;
+    border-radius: 9px;
+    padding: 8px;
+    font-size: 0.67rem;
+    color: #334155;
+    background: #eef3f9;
+    border-color: #dbe4ed;
+}
+
+body[data-page-role="agent"] #agentWorkflowPanel,
+body[data-page-role="credit_evaluator"] #evaluatorWorkflowPanel,
+body[data-page-role="all"] #agentWorkflowPanel,
+body[data-page-role="all"] #evaluatorWorkflowPanel {
+    grid-column: 2;
+    border-radius: 12px;
+    border: 1px solid #e3e9ef;
+    background: #ffffff;
+    padding: 10px;
+}
+
+body[data-page-role="agent"] #agentWorkflowPanel {
+    grid-column: 1;
+}
+
+body[data-page-role="credit_evaluator"] #evaluatorWorkflowPanel {
+    grid-column: 1;
+}
+
+body[data-page-role="agent"] .workflow-panel-head,
+body[data-page-role="credit_evaluator"] .workflow-panel-head,
+body[data-page-role="all"] .workflow-panel-head {
+    padding-bottom: 4px;
+    border-bottom: 1px solid #edf2f7;
+    margin-bottom: 2px;
+}
+
+body[data-page-role="agent"] .workflow-panel-head h3,
+body[data-page-role="credit_evaluator"] .workflow-panel-head h3,
+body[data-page-role="all"] .workflow-panel-head h3 {
+    font-size: 0.95rem;
+    color: #111827;
+}
+
+body[data-page-role="agent"] .workflow-list,
+body[data-page-role="credit_evaluator"] .workflow-list,
+body[data-page-role="all"] .workflow-list {
+    min-height: 220px;
+    max-height: 320px;
+    border-radius: 10px;
+    border: 1px solid #e7edf3;
+    background: #fbfdff;
+}
+
+body[data-page-role="agent"] .workflow-item,
+body[data-page-role="credit_evaluator"] .workflow-item,
+body[data-page-role="all"] .workflow-item,
+body[data-page-role="agent"] .workflow-queue-row,
+body[data-page-role="credit_evaluator"] .workflow-queue-row,
+body[data-page-role="all"] .workflow-queue-row {
+    border-color: #e4eaf0;
+    border-radius: 9px;
+    min-height: 38px;
+}
+
+@media (max-width: 1120px) {
+    body[data-page-role="agent"] .workflow-shell,
+    body[data-page-role="credit_evaluator"] .workflow-shell,
+    body[data-page-role="all"] .workflow-shell {
+        grid-template-columns: 1fr;
+    }
+
+    body[data-page-role="agent"] .auth-row,
+    body[data-page-role="credit_evaluator"] .auth-row,
+    body[data-page-role="all"] .auth-row {
+        grid-column: 1;
+    }
+
+    body[data-page-role="agent"] #agentWorkflowPanel,
+    body[data-page-role="credit_evaluator"] #evaluatorWorkflowPanel,
+    body[data-page-role="all"] #agentWorkflowPanel,
+    body[data-page-role="all"] #evaluatorWorkflowPanel {
+        grid-column: 1;
+    }
+
+    body[data-page-role="agent"] .workflow-route-links,
+    body[data-page-role="credit_evaluator"] .workflow-route-links,
+    body[data-page-role="all"] .workflow-route-links {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .dashboard-search {
+        min-width: 180px;
+    }
+}
+
+body[data-page-role="agent"] .dashboard-header-tools {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: nowrap;
+}
+
+.agent-portal-header {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 12px;
+}
+
+.agent-portal-title {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 800;
+    color: #162534;
+    white-space: nowrap;
+}
+
+.agent-portal-user {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: nowrap;
+}
+
+body[data-page-role="agent"] .auth-user-badge,
+body[data-page-role="credit_evaluator"] .auth-user-badge {
+    margin: 0;
+    border-radius: 0;
+    padding: 0;
+    font-size: 0.7rem;
+    background: transparent;
+    border: none;
+    color: #334155;
+    white-space: nowrap;
+}
+
+.agent-header-logout {
+    height: 22px !important;
+    min-width: 58px !important;
+    border-radius: 6px !important;
+    border: 1px solid #d7dee6 !important;
+    background: #ffffff !important;
+    color: #334155 !important;
+    font-size: 0.66rem !important;
+    font-weight: 600 !important;
+    white-space: nowrap;
+    padding: 0 7px !important;
+}
+
+body[data-page-role="credit_evaluator"] .agent-portal-user {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: nowrap;
+}
+
+body[data-page-role="agent"] header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+body[data-page-role="agent"] header h1 {
+    margin: 0;
+    white-space: nowrap;
+}
+
+@media (max-width: 780px) {
+    .agent-portal-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .agent-portal-user {
+        width: 100%;
+        justify-content: flex-end;
+    }
+}
+
+body[data-page-role="agent"] #legacyMain {
+    display: none !important;
+}
+
+/* Agent owns upload + processing, evaluator owns review/editor. */
+body[data-page-role="agent"] .results-section,
+body[data-page-role="agent"] .action-buttons {
+    display: none;
+}
+
+body[data-page-role="agent"] main {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto;
+}
+
+body[data-page-role="agent"] .upload-section {
+    grid-column: 1;
+    grid-row: 1;
+}
+
+body[data-page-role="agent"] .processing-section {
+    grid-column: 2;
+    grid-row: 1;
+}
+
+/* Flatten agent layering to avoid stacked border effect while scrolling. */
+body[data-page-role="agent"] .upload-section,
+body[data-page-role="agent"] .processing-section {
+    border: none;
+    box-shadow: none;
+    background: transparent;
+    padding: 0;
+}
+
+body[data-page-role="agent"] #agentWorkflowPanel {
+    border: none;
+    box-shadow: none;
+    background: transparent;
+    padding: 0;
+}
+
+body[data-page-role="agent"] .agent-submissions-table-wrap {
+    border: none;
+    background: transparent;
+    padding: 0;
+    margin-top: 0;
+}
+
+body[data-page-role="agent"] .agent-submissions-table {
+    border: 1px solid #e5ebf2;
+    border-radius: 10px;
+    background: #ffffff;
+}
+
+body[data-page-role="credit_evaluator"] .upload-section,
+body[data-page-role="credit_evaluator"] .action-buttons {
+    display: none;
+}
+
+body[data-page-role="credit_evaluator"] main {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+}
+
+body[data-page-role="credit_evaluator"] .processing-section {
+    display: block;
+    grid-column: 1;
+    grid-row: 1;
+}
+
+body[data-page-role="credit_evaluator"] .results-section {
+    grid-column: 1;
+    grid-row: 2;
+}
+
+/* Flatten evaluator layering to avoid stacked border effect while scrolling. */
+body[data-page-role="credit_evaluator"] .processing-section,
+body[data-page-role="credit_evaluator"] .results-section {
+    border: none;
+    box-shadow: none;
+    background: transparent;
+    padding: 0;
+}
+
+body[data-page-role="credit_evaluator"] #evaluatorWorkflowPanel {
+    border: none;
+    box-shadow: none;
+    background: transparent;
+    padding: 0;
+}
+
+body[data-page-role="credit_evaluator"] .agent-submissions-table-wrap {
+    border: none;
+    background: transparent;
+    padding: 0;
+    margin-top: 0;
+}
+
+body[data-page-role="credit_evaluator"] .agent-submissions-table {
+    border: 1px solid #e5ebf2;
+    border-radius: 10px;
+    background: #ffffff;
+}
+
+body[data-page-role="credit_evaluator"] .progress-status,
+body[data-page-role="credit_evaluator"] .extracted-data {
+    border: 1px solid #e3e9ef;
+    border-radius: 12px;
+    background: #ffffff;
+    box-shadow: none;
+}
+
+body[data-page-role="credit_evaluator"] .progress-status {
+    padding: 8px 10px;
+}
+
+body[data-page-role="credit_evaluator"] .extracted-data {
+    padding: 8px;
+}
+
+body[data-page-role="credit_evaluator"] .preview-panel,
+body[data-page-role="credit_evaluator"] .summary-card,
+body[data-page-role="credit_evaluator"] .table-panel,
+body[data-page-role="credit_evaluator"] .transactions-table {
+    border-color: #e8edf3;
+    box-shadow: none;
+}
+
+/* Evaluator layout: top row = preview + table, bottom row = summary. */
+body[data-page-role="credit_evaluator"] .comparison-layout {
+    grid-template-rows: clamp(720px, 62vh, 1120px) clamp(240px, 24vh, 380px);
+    height: auto;
+    min-height: 0;
+}
+
+body[data-page-role="credit_evaluator"] .top-panels {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+@media (max-width: 900px) {
+    body[data-page-role="agent"] main {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto auto;
+    }
+
+    body[data-page-role="agent"] .upload-section,
+    body[data-page-role="agent"] .processing-section {
+        grid-column: 1;
+    }
+
+    body[data-page-role="agent"] .upload-section {
+        grid-row: 1;
+    }
+
+    body[data-page-role="agent"] .processing-section {
+        grid-row: 2;
+    }
+}
+
+/* Force agent submit button to match login button scale/theme (override shared preview-nav). */
+body[data-page-role="agent"] .agent-upload-submit-row .agent-submit-btn,
+body[data-page-role="all"] .agent-upload-submit-row .agent-submit-btn {
+    height: 34px !important;
+    min-width: 0 !important;
+    width: 136px;
+    padding: 0 10px !important;
+    border-radius: 10px !important;
+    border: 1px solid #c8d9d2 !important;
+    background: #ecf6f1 !important;
+    color: #1c5d45 !important;
+    font-size: 0.78rem !important;
+    font-weight: 700 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+
+body[data-page-role="agent"] .agent-upload-submit-row .agent-submit-btn:disabled,
+body[data-page-role="all"] .agent-upload-submit-row .agent-submit-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+@media (max-width: 980px) {
+    body[data-page-role="agent"] .agent-upload-submit-row .agent-submit-btn,
+    body[data-page-role="all"] .agent-upload-submit-row .agent-submit-btn {
+        width: 100%;
     }
 }

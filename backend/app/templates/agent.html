@@ -8,42 +8,20 @@
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
-<body data-page-role="{{ page_role or 'all' }}">
+<body data-page-role="agent">
     <div class="container">
-        <header>
-            <h1>
-                {% if (page_role or 'all') == 'agent' %}
-                Agent Dashboard
-                {% elif (page_role or 'all') == 'credit_evaluator' %}
-                Evaluator Dashboard
-                {% else %}
-                Workflow Dashboard
-                {% endif %}
-            </h1>
-            <div class="dashboard-header-tools">
-                <input type="text" class="dashboard-search" placeholder="Search submissions..." aria-label="Search submissions">
+        <header class="agent-portal-header">
+            <h1 class="agent-portal-title">Agent Portal</h1>
+            <div class="agent-portal-user">
+                <span id="authUserBadge" class="auth-user-badge">Not logged in</span>
+                <button id="authLogoutBtn" class="preview-nav agent-header-logout" style="display:none;">Logout</button>
             </div>
         </header>
 
         <section class="workflow-shell">
-            <div class="auth-row">
-                <div class="auth-controls" id="authControls">
-                    <div class="workflow-route-links">
-                        <a href="/agent" class="workflow-route-link {{ 'is-active' if (page_role or 'all') == 'agent' else '' }}">Agent</a>
-                        <a href="/evaluator" class="workflow-route-link {{ 'is-active' if (page_role or 'all') == 'credit_evaluator' else '' }}">Evaluator</a>
-                    </div>
-                    <input type="email" id="authEmail" placeholder="Email">
-                    <input type="password" id="authPassword" placeholder="Password">
-                    <button id="authLoginBtn" class="preview-nav">Login</button>
-                    <button id="authLogoutBtn" class="preview-nav" style="display:none;">Logout</button>
-                    <span id="authUserBadge" class="auth-user-badge">Not logged in</span>
-                </div>
-            </div>
-            {% if (page_role or 'all') in ['all', 'agent'] %}
             <div id="agentWorkflowPanel" class="workflow-panel" style="display:none;">
                 <div class="workflow-panel-head">
                     <h3>Agent Workflow</h3>
-                    <button id="agentRefreshBtn" class="preview-nav">Refresh</button>
                 </div>
                 <div class="workflow-actions agent-upload-fields">
                     <input type="text" id="agentBorrowerName" placeholder="Borrower name">
@@ -77,31 +55,14 @@
                         </div>
                     </div>
                 </div>
-                <div id="agentSubmissionList" class="workflow-list"></div>
-            </div>
-            {% endif %}
-            {% if (page_role or 'all') in ['all', 'credit_evaluator'] %}
-            <div id="evaluatorWorkflowPanel" class="workflow-panel" style="display:none;">
-                <div class="workflow-panel-head">
-                    <h3>Evaluator Workflow</h3>
-                    <button id="evaluatorRefreshBtn" class="preview-nav">Refresh</button>
-                </div>
-                <div class="workflow-queue-head">
-                    <span>Submission</span>
-                    <span>Status</span>
-                    <span>Job</span>
-                    <span>Actions</span>
-                </div>
-                <div id="evaluatorSubmissionList" class="workflow-list workflow-queue"></div>
-                <div id="evaluatorActionBar" class="workflow-actions" style="display:none;">
-                    <button id="evaluatorOpenBtn" class="preview-nav">Open in Editor</button>
-                    <button id="evaluatorSaveBtn" class="preview-nav">Save Edits</button>
-                    <button id="evaluatorAnalyzeBtn" class="preview-nav">Analyze</button>
-                    <button id="evaluatorReportBtn" class="preview-nav">Generate Report</button>
-                    <button id="evaluatorReadyBtn" class="preview-nav">Mark Summary Ready</button>
+                <div class="agent-submissions-table-wrap">
+                    <div class="agent-submissions-toolbar">
+                        <div class="agent-submissions-table-title">Submitted Files</div>
+                        <input type="text" id="agentSearchInput" class="agent-submissions-search" placeholder="Search borrower name..." aria-label="Search borrower name">
+                    </div>
+                    <div id="agentSubmissionList" class="agent-submissions-table"></div>
                 </div>
             </div>
-            {% endif %}
         </section>
 
         <main id="legacyMain">
@@ -161,10 +122,7 @@
                 <div class="extracted-data">
                     <div class="section-header">
                         <h3>Extracted Data</h3>
-                        <div class="section-header-actions">
-                            <button class="csv-button" id="downloadCSV" aria-label="Export to PDF" title="Export to PDF">Export to PDF</button>
-                            <button class="csv-button" id="exportExcelBtn" aria-label="Export to Excel" title="Export to Excel">Export to Excel</button>
-                        </div>
+                        <button class="csv-button" id="downloadCSV" aria-label="Export to PDF" title="Export to PDF">Export to PDF</button>
                     </div>
                     <div class="comparison-layout">
                         <div class="top-panels">
@@ -226,14 +184,12 @@
                                                         <th>Month</th>
                                                         <th>Debit</th>
                                                         <th>Credit</th>
-                                                        <th>Avg Debit</th>
-                                                        <th>Avg Credit</th>
                                                         <th>ADB</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody id="monthlySummaryBody">
                                                     <tr>
-                                                        <td colspan="6">No monthly data</td>
+                                                        <td colspan="4">No monthly data</td>
                                                     </tr>
                                                 </tbody>
                                             </table>
@@ -273,7 +229,6 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>

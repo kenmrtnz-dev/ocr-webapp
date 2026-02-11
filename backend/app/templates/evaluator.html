@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bank Statement OCR Processing</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body data-page-role="credit_evaluator">
+    <div class="container">
+        <header class="agent-portal-header">
+            <h1 class="agent-portal-title">Evaluator Portal</h1>
+            <div class="agent-portal-user">
+                <span id="authUserBadge" class="auth-user-badge">Not logged in</span>
+                <button id="authLogoutBtn" class="preview-nav agent-header-logout" style="display:none;">Logout</button>
+            </div>
+        </header>
+
+        <section class="workflow-shell">
+            <div id="evaluatorWorkflowPanel" class="workflow-panel" style="display:none;">
+                <div class="workflow-panel-head">
+                    <h3>Evaluator Workflow</h3>
+                    <button id="evaluatorRefreshBtn" class="preview-nav">Refresh</button>
+                </div>
+                <div class="agent-submissions-table-wrap">
+                    <div class="agent-submissions-toolbar">
+                        <div class="agent-submissions-table-title">Submitted Files</div>
+                        <input type="text" id="evaluatorSearchInput" class="agent-submissions-search" placeholder="Search borrower name..." aria-label="Search borrower name">
+                    </div>
+                    <div id="evaluatorSubmissionList" class="agent-submissions-table"></div>
+                </div>
+            </div>
+        </section>
+
+        <main id="legacyMain">
+            <div class="upload-section">
+                <div class="upload-area" id="uploadArea">
+                    <div class="upload-icon">
+                        <i class="fas fa-cloud-upload-alt"></i>
+                    </div>
+                    <div class="upload-text">
+                        <button class="browse-button" id="browseButton">Browse</button>
+                        <h3>Upload File</h3>
+                        <label class="mode-toggle" for="ocrToggle" title="Off = Text Only, On = OCR">
+                            <span class="mode-toggle-text" id="modeToggleText">TEXT</span>
+                            <input type="checkbox" id="ocrToggle" class="mode-toggle-input" aria-label="OCR Mode">
+                            <span class="mode-toggle-track" aria-hidden="true"></span>
+                        </label>
+                        <input type="file" id="fileInput" class="file-input" accept=".pdf,application/pdf">
+                    </div>
+                    <p class="formats-info">Accepted format: PDF</p>
+                </div>
+                
+                <div class="file-info" id="fileInfo">
+                    <i class="fas fa-file-alt"></i>
+                    <div class="file-details">
+                        <div class="file-name" id="fileName">No file selected</div>
+                        <div class="file-size" id="fileSize">-</div>
+                    </div>
+                    <button class="remove-btn" id="removeFile">&times;</button>
+                </div>
+            </div>
+
+            <div class="processing-section">
+                <h2>Processing Status</h2>
+                <div class="progress-status">
+                    <div class="progress-meta">
+                        <span id="progressLabel">Waiting for upload</span>
+                        <span id="progressPercent">0%</span>
+                    </div>
+                    <div class="progress-track" aria-hidden="true">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <div class="progress-info-row">
+                        <p class="progress-step" id="progressStep">Queued</p>
+                        <p class="progress-elapsed" id="progressElapsed">Elapsed: 00:00</p>
+                    </div>
+                    <p class="progress-model" id="progressModel">OCR Model: -</p>
+                    <p class="progress-analyzer" id="analyzerStatus">AI Analyzer: Idle</p>
+                    <div class="progress-analyzer-row is-hidden" id="progressAnalyzerRow">
+                        <span class="progress-analyzer-item" id="analyzerModel">Model: -</span>
+                        <span class="progress-analyzer-item" id="analyzerProfile">Profile: -</span>
+                        <span class="progress-analyzer-item" id="analyzerReason">Reason: -</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="results-section">
+                <div class="extracted-data">
+                    <div class="section-header">
+                        <h3>Extracted Data</h3>
+                        <div class="section-header-actions">
+                            <button class="csv-button" id="downloadCSV" aria-label="Export to PDF" title="Export to PDF">Export to PDF</button>
+                            <button class="csv-button" id="exportExcelBtn" aria-label="Export to Excel" title="Export to Excel">Export to Excel</button>
+                        </div>
+                    </div>
+                    <div class="comparison-layout">
+                        <div class="top-panels">
+                            <div class="preview-panel">
+                                <div class="preview-toolbar">
+                                    <button class="preview-nav" id="prevPageBtn">Prev</button>
+                                    <span id="pageIndicator">Page 0 / 0</span>
+                                    <button class="preview-nav" id="nextPageBtn">Next</button>
+                                    <select class="preview-page-select" id="pageSelect" aria-label="Jump to page">
+                                        <option value="">Page</option>
+                                    </select>
+                                    <button class="preview-nav preview-nav-icon" id="zoomOutBtn" aria-label="Zoom out" title="Zoom out">-</button>
+                                    <span class="preview-zoom" id="zoomLevel">100%</span>
+                                    <button class="preview-nav preview-nav-icon" id="zoomInBtn" aria-label="Zoom in" title="Zoom in">+</button>
+                                    <button class="preview-nav" id="resetViewBtn">Reset View</button>
+                                </div>
+                                <div class="preview-canvas-wrap">
+                                    <img id="previewImage" alt="Statement page preview">
+                                    <canvas id="previewCanvas"></canvas>
+                                </div>
+                            </div>
+                            <div class="table-panel">
+                                <div class="transactions-table">
+                                    <div class="table-header">
+                                        <div class="table-cell">#</div>
+                                        <div class="table-cell">Date</div>
+                                        <div class="table-cell">Description</div>
+                                        <div class="table-cell">Debit</div>
+                                        <div class="table-cell">Credit</div>
+                                        <div class="table-cell">Balance</div>
+                                        <div class="table-cell">Actions</div>
+                                    </div>
+                                    <div class="table-body"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="summary-card">
+                            <h3>Summary</h3>
+                            <div class="summary-split">
+                                <div class="summary-left">
+                                    <div class="summary-items">
+                                        <div class="summary-item">
+                                            <div class="summary-label">Account Name</div>
+                                            <div class="summary-value" id="accountNameSummary">-</div>
+                                        </div>
+                                        <div class="summary-item">
+                                            <div class="summary-label">Account Number</div>
+                                            <div class="summary-value" id="accountNumberSummary">-</div>
+                                        </div>
+                                        <div class="summary-item">
+                                            <div class="summary-label">Total Transactions</div>
+                                            <div class="summary-value" id="totalTransactions">45</div>
+                                        </div>
+                                        <div class="summary-item">
+                                            <div class="summary-label">Debit Transactions</div>
+                                            <div class="summary-value" id="totalDebitTransactions">0</div>
+                                        </div>
+                                        <div class="summary-item">
+                                            <div class="summary-label">Credit Transactions</div>
+                                            <div class="summary-value" id="totalCreditTransactions">0</div>
+                                        </div>
+                                        <div class="summary-item">
+                                            <div class="summary-label">Average Daily Balance (ADB)</div>
+                                            <div class="summary-value" id="endingBalance">₱0.00</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="summary-right">
+                                    <div class="monthly-summary-header">Monthly Summary</div>
+                                    <div class="monthly-summary-wrap">
+                                        <table class="monthly-summary-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>Month</th>
+                                                    <th>Debit</th>
+                                                    <th>Credit</th>
+                                                    <th>Avg Debit</th>
+                                                    <th>Avg Credit</th>
+                                                    <th>ADB</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="monthlySummaryBody">
+                                                <tr>
+                                                    <td colspan="6">No monthly data</td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="action-buttons">
+                <button class="btn btn-secondary" id="viewDetails">
+                    <i class="fas fa-eye"></i> View Details
+                </button>
+                <button class="btn btn-primary" id="finishSave">
+                    <i class="fas fa-check-circle"></i> Start OCR
+                </button>
+            </div>
+        </main>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>

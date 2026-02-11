@@ -37,7 +37,8 @@ def _config_path() -> Path:
     configured = os.getenv("BANK_PROFILES_CONFIG", "").strip()
     if configured:
         return Path(configured)
-    return Path("/data/config/bank_profiles.json")
+    data_dir = Path(os.getenv("DATA_DIR", "./data"))
+    return data_dir / "config" / "bank_profiles.json"
 
 
 def _normalize_items(values: List[str]) -> List[str]:
