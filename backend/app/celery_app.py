@@ -12,7 +12,7 @@ from app.bank_profiles import detect_bank_profile, extract_account_identity, fin
 from app.image_cleaner import clean_page
 from app.ocr_engine import ocr_image
 from app.pdf_text_extract import extract_pdf_layout_pages
-from app.profile_analyzer import analyze_unknown_bank_and_apply
+from app.profile_analyzer import analyze_account_identity_from_text, analyze_unknown_bank_and_apply
 from app.statement_parser import parse_page_with_profile_fallback, is_transaction_row
 
 
@@ -254,6 +254,9 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
         account_number = None
         account_name_bbox = None
         account_number_bbox = None
+        account_identity_source = "profile_regex"
+        account_identity_ai_result = "not_attempted"
+        account_identity_ai_reason = None
         for layout in layout_pages[:5]:
             text = (layout or {}).get("text", "")
             if not text:
@@ -266,6 +269,24 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
                 account_number = account_identity.get("account_number")
             if account_name and account_number:
                 break
+        first_page_text = ""
+        for layout in layout_pages:
+            first_page_text = str((layout or {}).get("text") or "").strip()
+            if first_page_text:
+                break
+        account_ai_attempted = False
+        if first_page_text and (not account_name or not account_number):
+            report("processing", "account_identity_ai", 46, ocr_backend=OCR_BACKEND)
+            ai_identity = analyze_account_identity_from_text(first_page_text)
+            account_ai_attempted = True
+            account_identity_ai_result = str(ai_identity.get("result") or "failed")
+            account_identity_ai_reason = str(ai_identity.get("reason") or "")
+            if not account_name:
+                account_name = ai_identity.get("account_name")
+            if not account_number:
+                account_number = ai_identity.get("account_number")
+            if account_name or account_number:
+                account_identity_source = "ai_first_page"
 
         diagnostics: Dict[str, Dict] = {
             "job": {
@@ -277,6 +298,10 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
                 "account_number": account_number,
                 "account_name_bbox": account_name_bbox,
                 "account_number_bbox": account_number_bbox,
+                "account_identity_source": account_identity_source,
+                "account_identity_ai_attempted": account_ai_attempted,
+                "account_identity_ai_result": account_identity_ai_result,
+                "account_identity_ai_reason": account_identity_ai_reason,
                 "profile_analyzer_triggered": bool(analyzer_meta.get("triggered", False)),
                 "profile_analyzer_provider": analyzer_meta.get("provider"),
                 "profile_analyzer_model": analyzer_meta.get("model"),
@@ -340,6 +365,18 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
                         account_name = account_identity.get("account_name")
                     if not account_number:
                         account_number = account_identity.get("account_number")
+                if idx == 1 and (not account_name or not account_number):
+                    report("processing", "account_identity_ai", 46, ocr_backend=OCR_BACKEND)
+                    ai_identity = analyze_account_identity_from_text(ocr_text)
+                    account_ai_attempted = True
+                    account_identity_ai_result = str(ai_identity.get("result") or "failed")
+                    account_identity_ai_reason = str(ai_identity.get("reason") or "")
+                    if not account_name:
+                        account_name = ai_identity.get("account_name")
+                    if not account_number:
+                        account_number = ai_identity.get("account_number")
+                    if account_name or account_number:
+                        account_identity_source = "ai_first_page_ocr"
                 if not account_name_bbox and account_name:
                     account_name_bbox = find_value_bounds(ocr_words, page_w, page_h, account_name, page_name)
                 if not account_number_bbox and account_number:
@@ -357,6 +394,18 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
                         account_name = account_identity.get("account_name")
                     if not account_number:
                         account_number = account_identity.get("account_number")
+                if idx == 1 and profile_text and (not account_name or not account_number):
+                    report("processing", "account_identity_ai", 46, ocr_backend=OCR_BACKEND)
+                    ai_identity = analyze_account_identity_from_text(profile_text)
+                    account_ai_attempted = True
+                    account_identity_ai_result = str(ai_identity.get("result") or "failed")
+                    account_identity_ai_reason = str(ai_identity.get("reason") or "")
+                    if not account_name:
+                        account_name = ai_identity.get("account_name")
+                    if not account_number:
+                        account_number = ai_identity.get("account_number")
+                    if account_name or account_number:
+                        account_identity_source = "ai_first_page"
                 if not account_name_bbox and account_name:
                     account_name_bbox = find_value_bounds(parser_words, parser_w, parser_h, account_name, page_name)
                 if not account_number_bbox and account_number:
@@ -416,6 +465,10 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
             diagnostics["job"]["account_number"] = account_number
             diagnostics["job"]["account_name_bbox"] = account_name_bbox
             diagnostics["job"]["account_number_bbox"] = account_number_bbox
+            diagnostics["job"]["account_identity_source"] = account_identity_source
+            diagnostics["job"]["account_identity_ai_attempted"] = account_ai_attempted
+            diagnostics["job"]["account_identity_ai_result"] = account_identity_ai_result
+            diagnostics["job"]["account_identity_ai_reason"] = account_identity_ai_reason
 
             with open(os.path.join(ocr_dir, f"{page_name}.json"), "w") as f:
                 json.dump(ocr_items, f, indent=2)

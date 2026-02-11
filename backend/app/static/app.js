@@ -638,10 +638,17 @@ async function loadAccountSummary() {
   accountNameSummary.textContent = '-';
   accountNumberSummary.textContent = '-';
   try {
-    const res = await fetch(`/jobs/${currentJobId}/diagnostics`);
-    if (!res.ok) return;
-    const diagnostics = await res.json();
-    const job = diagnostics && diagnostics.job ? diagnostics.job : {};
+    let job = null;
+    const identityRes = await fetch(`/jobs/${currentJobId}/account-identity`);
+    if (identityRes.ok) {
+      job = await identityRes.json();
+    } else {
+      const res = await fetch(`/jobs/${currentJobId}/diagnostics`);
+      if (!res.ok) return;
+      const diagnostics = await res.json();
+      job = diagnostics && diagnostics.job ? diagnostics.job : {};
+    }
+    if (!job) return;
     accountNameSummary.textContent = (job.account_name || '-').toString();
     accountNumberSummary.textContent = (job.account_number || '-').toString();
     identityBoundsByPage = {};
@@ -1681,6 +1688,7 @@ function stepToLabel(step) {
   if (key === 'pdf_to_images') return 'Converting PDF to images';
   if (key === 'image_cleaning') return 'Cleaning page images';
   if (key === 'text_extraction') return 'Extracting PDF text';
+  if (key === 'account_identity_ai') return 'Extracting account identity';
   if (key === 'profile_analyzer') return 'Analyzing unknown bank structure';
   if (key === 'page_ocr') return 'Running OCR per page';
   if (key === 'page_text') return 'Parsing text per page';
