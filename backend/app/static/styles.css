@@ -449,7 +449,13 @@ h3 {
     overflow: hidden;
     flex: 1;
     min-height: 0;
+    display: block;
+}
+
+.monthly-summary-wrap.is-empty {
     display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .monthly-summary-table {
@@ -458,6 +464,7 @@ h3 {
     font-family: 'Manrope', sans-serif;
     font-size: 0.62rem;
     table-layout: fixed;
+    align-self: flex-start;
 }
 
 .monthly-summary-table th,
