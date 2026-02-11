@@ -814,61 +814,30 @@ function drawBoundingBoxes() {
 
   ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
 
+  // Show only active row highlight in preview (no full bbox set, no row labels).
   const pageKey = pageFile.replace('.png', '');
-  const bounds = boundsByPage[pageKey] || [];
   const activeRow = parsedRows.find((r) => r.row_key === activeRowKey);
   const activeOcrRowId = (activeRow && activeRow.page === pageKey && activeRow.global_row_id)
     ? activeRow.global_row_id
     : null;
+  if (activeOcrRowId) {
+    const bounds = boundsByPage[pageKey] || [];
+    const activeBound = bounds.find((b) => pageRowToGlobal[`${pageKey}|${b.row_id}`] === activeOcrRowId);
+    if (activeBound) {
+      const x1 = activeBound.x1 * drawW;
+      const y1 = activeBound.y1 * drawH;
+      const x2 = activeBound.x2 * drawW;
+      const y2 = activeBound.y2 * drawH;
+      const width = Math.max(1, x2 - x1);
+      const height = Math.max(1, y2 - y1);
 
-  bounds.forEach((b) => {
-    const mappedGlobalId = pageRowToGlobal[`${pageKey}|${b.row_id}`];
-    if (!mappedGlobalId) {
-      // Row was deleted from table (or is otherwise unmapped), so hide its bbox.
-      return;
+      ctx.fillStyle = 'rgba(34, 197, 94, 0.18)';
+      ctx.fillRect(x1, y1, width, height);
+      ctx.strokeStyle = 'rgba(22, 163, 74, 0.9)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x1, y1, width, height);
     }
-
-    const x1 = b.x1 * drawW;
-    const y1 = b.y1 * drawH;
-    const x2 = b.x2 * drawW;
-    const y2 = b.y2 * drawH;
-
-    const width = Math.max(1, x2 - x1);
-    const height = Math.max(1, y2 - y1);
-    const globalId = mappedGlobalId;
-    const isActive = activeOcrRowId !== null && globalId === activeOcrRowId;
-
-    ctx.strokeStyle = isActive ? '#16a34a' : '#22c55e';
-    ctx.lineWidth = isActive ? 1.6 : 1.0;
-    ctx.strokeRect(x1, y1, width, height);
-
-    ctx.fillStyle = isActive ? '#16a34a' : '#22c55e';
-    const labelSize = Math.max(11, Math.min(18, 11 + ((previewZoom - 1) * 4)));
-    ctx.font = `600 ${labelSize}px "Manrope", sans-serif`;
-    const textWidth = ctx.measureText(globalId).width;
-    const labelX = Math.max(2, x1 - textWidth - 6);
-    const labelY = Math.min(drawH - 2, Math.max(labelSize, y1 + (height / 2) + 4));
-    ctx.fillText(globalId, labelX, labelY);
-  });
-
-  const identityBoxes = identityBoundsByPage[pageKey] || [];
-  identityBoxes.forEach((b) => {
-    const x1 = Number(b.x1 || 0) * drawW;
-    const y1 = Number(b.y1 || 0) * drawH;
-    const x2 = Number(b.x2 || 0) * drawW;
-    const y2 = Number(b.y2 || 0) * drawH;
-    const width = Math.max(1, x2 - x1);
-    const height = Math.max(1, y2 - y1);
-    const label = b.kind === 'account_number' ? 'ACC NO' : 'ACC NAME';
-
-    ctx.strokeStyle = '#0ea5e9';
-    ctx.lineWidth = 1.2;
-    ctx.strokeRect(x1, y1, width, height);
-
-    ctx.fillStyle = '#0ea5e9';
-    ctx.font = '600 11px "Manrope", sans-serif';
-    ctx.fillText(label, Math.max(2, x1 + 2), Math.max(11, y1 - 3));
-  });
+  }
 
   if (flattenMode) {
     drawFlattenOverlay(ctx);
@@ -1179,11 +1148,13 @@ function computeMonthlySummary(rows) {
   rows.forEach((row, idx) => {
     const date = parseStatementDate(row.date || '');
     if (!date) return;
+    const debit = normalizeSummaryAmount(row, 'debit');
+    const credit = normalizeSummaryAmount(row, 'credit');
     transactions.push({
       idx,
       date,
-      debit: normalizeAmount(row.debit || ''),
-      credit: normalizeAmount(row.credit || ''),
+      debit,
+      credit,
     });
   });
   if (!transactions.length) return [];
@@ -1245,10 +1216,29 @@ function formatPesoValue(value, absolute = false) {
 
 function normalizeAmount(value) {
   if (value === null || value === undefined) return NaN;
-  const cleaned = String(value).replace(/[^0-9.-]/g, '');
-  if (!cleaned) return NaN;
-  const parsed = Number.parseFloat(cleaned);
-  return Number.isFinite(parsed) ? parsed : NaN;
+  const raw = String(value).trim();
+  if (!raw) return NaN;
+
+  const hasParenNegative = /\(\s*[\d,.\-]+\s*\)/.test(raw);
+  const numericTokens = raw.match(/-?\d[\d,]*(?:\.\d+)?/g) || [];
+  if (!numericTokens.length) return NaN;
+
+  // Prefer explicit money-like tokens (decimal or comma-grouped) and use the last one.
+  const moneyLike = numericTokens.filter((token) => /\.\d{1,}$/.test(token) || /,\d{3}/.test(token));
+  const candidates = (moneyLike.length ? moneyLike : numericTokens).filter((token) => {
+    const compact = token.replace(/[^0-9]/g, '');
+    const hasDecimal = token.includes('.');
+    // Ignore likely identifiers (e.g., long account/reference numbers) when not decimal amounts.
+    if (!hasDecimal && compact.length >= 11) return false;
+    return compact.length > 0;
+  });
+  if (!candidates.length) return NaN;
+
+  const chosen = candidates[candidates.length - 1].replace(/,/g, '');
+  const parsed = Number.parseFloat(chosen);
+  if (!Number.isFinite(parsed)) return NaN;
+  if (hasParenNegative && parsed > 0) return -parsed;
+  return parsed;
 }
 
 function parseStatementDate(value) {
@@ -1539,9 +1529,25 @@ function renderMonthlySummary(rows) {
 
 function countAmountTransactions(rows, field) {
   return rows.reduce((count, row) => {
-    const amount = normalizeAmount(row[field]);
+    const amount = normalizeSummaryAmount(row, field);
     return Number.isFinite(amount) && Math.abs(amount) > 0 ? count + 1 : count;
   }, 0);
+}
+
+function normalizeSummaryAmount(row, field) {
+  const amount = normalizeAmount(row && row[field]);
+  if (!Number.isFinite(amount)) return NaN;
+  const absAmount = Math.abs(amount);
+
+  // Guard against reference/account-like values leaking into amount columns.
+  if (absAmount >= 1_000_000_000) return NaN;
+
+  const balance = normalizeAmount(row && row.balance);
+  if (Number.isFinite(balance) && Math.abs(balance) > 0) {
+    if (absAmount > Math.abs(balance) * 50) return NaN;
+  }
+
+  return amount;
 }
 
 function getDisplayValue(row, field) {

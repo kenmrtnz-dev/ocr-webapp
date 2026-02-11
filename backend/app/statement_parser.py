@@ -262,7 +262,7 @@ def parse_words_page(
         diagnostics["row_candidates"] += 1
         date_txt = _nearest_text(line["words"], date_x)
         debit_txt, credit_txt, balance_txt = _assign_amount_columns(
-            line["words"], debit_x, credit_x, balance_x
+            line["words"], debit_x, credit_x, balance_x, profile
         )
 
         # Parse dates from the full line first so multi-token dates
@@ -302,6 +302,14 @@ def parse_words_page(
         if _is_opening_balance_line(line_text):
             debit = None
             credit = None
+
+        description, debit, credit = _sanitize_profile_flow_values(
+            profile,
+            line_text,
+            description,
+            debit,
+            credit,
+        )
 
         row_id = f"{len(rows) + 1:03}"
         rows.append({
@@ -582,15 +590,22 @@ def _assign_amount_columns(
     debit_x: float,
     credit_x: float,
     balance_x: float,
+    profile: Optional[BankProfile] = None,
 ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     amount_words = []
+    flow_left = min(debit_x, credit_x, balance_x)
     for w in words:
+        token = str(w.get("text", "")).strip()
+        cx = (w["x1"] + w["x2"]) / 2.0
+        if _is_profile_amount_zone_restricted(profile) and cx < (flow_left - 4.0):
+            continue
+        if _is_profile_reference_code(profile, token):
+            continue
         if _is_date_like_token(w.get("text", "")):
             continue
         norm = normalize_amount(w["text"])
         if norm is None:
             continue
-        cx = (w["x1"] + w["x2"]) / 2.0
         amount_words.append({"cx": cx, "value": norm})
 
     if not amount_words:
@@ -654,7 +669,7 @@ def _extract_description_from_header_line(
         token = (w.get("text") or "").strip()
         if not token:
             continue
-        if normalize_amount(token) is not None:
+        if normalize_amount(token) is not None and not _is_profile_reference_code(profile, token):
             continue
         if normalize_date(token, profile.date_order) is not None:
             continue
@@ -718,7 +733,7 @@ def _extract_description_from_words(words: List[Dict], profile: BankProfile) -> 
         lower = token.lower()
         if lower in ignored_tokens:
             continue
-        if normalize_amount(token) is not None:
+        if normalize_amount(token) is not None and not _is_profile_reference_code(profile, token):
             continue
         if normalize_date(token, profile.date_order) is not None:
             continue
@@ -746,6 +761,50 @@ def _extract_line_amounts(line_text: str) -> List[str]:
         if norm is not None:
             out.append(norm)
     return out
+
+
+def _is_profile_reference_code(profile: Optional[BankProfile], token: str) -> bool:
+    if not profile:
+        return False
+    if profile.name != "AUTO_BUSINESS_BANKING_GROWIDE":
+        return False
+    cleaned = (token or "").strip().replace(",", "")
+    # BDO digital profile contains long reference-like numeric codes (often ending in .00)
+    # inside description; do not treat them as debit/credit amounts.
+    return bool(re.fullmatch(r"\d{10,}(?:\.00)?", cleaned))
+
+
+def _is_profile_amount_zone_restricted(profile: Optional[BankProfile]) -> bool:
+    return bool(profile and profile.name == "AUTO_BUSINESS_BANKING_GROWIDE")
+
+
+def _sanitize_profile_flow_values(
+    profile: Optional[BankProfile],
+    line_text: str,
+    description: Optional[str],
+    debit: Optional[str],
+    credit: Optional[str],
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    if not profile or profile.name != "AUTO_BUSINESS_BANKING_GROWIDE":
+        return description, debit, credit
+
+    desc = str(description or "").strip()
+
+    def strip_ref_amount(value: Optional[str]) -> Optional[str]:
+        nonlocal desc
+        if not value:
+            return value
+        raw = str(value).strip()
+        if not re.fullmatch(r"\d{10,}\.00", raw):
+            return value
+        code = raw[:-3]
+        if code and code not in desc and code in re.sub(r"[^0-9]", "", line_text or ""):
+            desc = (f"{desc} {code}").strip()
+        return None
+
+    debit = strip_ref_amount(debit)
+    credit = strip_ref_amount(credit)
+    return (desc or None), debit, credit
 
 
 def _parse_rows_without_header(
