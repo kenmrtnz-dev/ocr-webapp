@@ -90,7 +90,7 @@ docker compose up --build
 - Health: `http://localhost:8000/health`
 
 ## Default Login Accounts
-Configured by env and seeded at startup:
+Configured by env and seeded at startup in dev/test by default:
 - Agent: `agent@example.com` / `agent123`
 - Evaluator: `evaluator@example.com` / `evaluator123`
 - Admin: `admin@example.com` / `admin123`
@@ -99,6 +99,11 @@ Change via `.env`:
 - `DEFAULT_AGENT_EMAIL`, `DEFAULT_AGENT_PASSWORD`
 - `DEFAULT_EVALUATOR_EMAIL`, `DEFAULT_EVALUATOR_PASSWORD`
 - `DEFAULT_ADMIN_EMAIL`, `DEFAULT_ADMIN_PASSWORD`
+- `SEED_DEFAULT_USERS` (`true|false`, default: auto-enabled in dev/test, disabled in non-dev)
+
+Security note:
+- In non-dev environments, startup fails if `JWT_SECRET` is weak/default.
+- Use a strong `JWT_SECRET` and disable default-user seeding unless explicitly required.
 
 ## Portals
 - `/login` -> login page
@@ -187,6 +192,8 @@ Admin clear action removes:
 - `POST /admin/clear-submissions`
 
 ### Jobs / OCR Outputs
+All `/jobs/*` routes require `Authorization: Bearer <token>`.
+
 - `POST /jobs`
 - `POST /jobs/draft`
 - `POST /jobs/{job_id}/start`
@@ -216,6 +223,7 @@ Common env vars:
 - `JWT_SECRET`
 - `JWT_ISS`
 - `JWT_EXP_SECONDS`
+- `SEED_DEFAULT_USERS`
 
 Preview/processing controls:
 - `PREVIEW_DPI`

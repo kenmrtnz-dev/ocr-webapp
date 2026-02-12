@@ -113,6 +113,7 @@ let panStartY = 0;
 let panOriginX = 0;
 let panOriginY = 0;
 const prefetchedPreviewSrcs = new Set();
+const previewBlobUrlCache = new Map();
 let authToken = localStorage.getItem('auth_token') || '';
 let authRole = localStorage.getItem('auth_role') || '';
 let authUserEmail = localStorage.getItem('auth_email') || '';
@@ -264,6 +265,7 @@ async function doLogin() {
 
 function doLogout() {
   evaluatorSelectedSubmission = null;
+  clearPreviewBlobCache();
   setAuthState('', '', '');
   setLegacyEditorVisible(false);
   window.location.href = '/login';
@@ -664,7 +666,7 @@ async function openEvaluatorSubmission(submissionId) {
 
   const shouldStartProcessing = String(evaluatorSelectedSubmission.status || '').toLowerCase() === 'for_review';
   if (shouldStartProcessing) {
-    const startRes = await fetch(`/jobs/${currentJobId}/start`, { method: 'POST' });
+    const startRes = await fetchAuthed(`/jobs/${currentJobId}/start`, { method: 'POST' });
     const startBody = await safeParseJson(startRes);
     if (!startRes.ok) {
       alert((startBody && startBody.detail) || 'Failed to start processing');
@@ -681,7 +683,7 @@ async function openEvaluatorSubmission(submissionId) {
     return;
   }
 
-  const statusRes = await fetch(`/jobs/${currentJobId}`);
+  const statusRes = await fetchAuthed(`/jobs/${currentJobId}`);
   const statusBody = await safeParseJson(statusRes);
   if (statusRes.ok && statusBody && statusBody.status === 'done') {
     stopElapsedTimer();
@@ -697,7 +699,7 @@ async function openEvaluatorSubmission(submissionId) {
       stopElapsedTimer();
     }
   } else {
-    const startRes = await fetch(`/jobs/${currentJobId}/start`, { method: 'POST' });
+    const startRes = await fetchAuthed(`/jobs/${currentJobId}/start`, { method: 'POST' });
     const startBody = await safeParseJson(startRes);
     if (!startRes.ok) {
       alert((startBody && startBody.detail) || 'Failed to start processing');
@@ -720,7 +722,7 @@ async function runEvaluatorStartProcessing() {
     return;
   }
   currentJobId = evaluatorSelectedSubmission.current_job_id;
-  const res = await fetch(`/jobs/${currentJobId}/start`, { method: 'POST' });
+  const res = await fetchAuthed(`/jobs/${currentJobId}/start`, { method: 'POST' });
   const body = await safeParseJson(res);
   if (!res.ok) {
     alert((body && body.detail) || 'Failed to start processing');
@@ -1167,7 +1169,7 @@ if (applyFlattenBtn) {
       const pageFile = pageList[currentPageIndex];
       const pageKey = pageFile.replace('.png', '');
 
-      const res = await fetch(`/jobs/${currentJobId}/pages/${pageKey}/flatten`, {
+      const res = await fetchAuthed(`/jobs/${currentJobId}/pages/${pageKey}/flatten`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ points: flattenPoints }),
@@ -1200,7 +1202,7 @@ if (resetFlattenBtn) {
       const pageFile = pageList[currentPageIndex];
       const pageKey = pageFile.replace('.png', '');
 
-      const res = await fetch(`/jobs/${currentJobId}/pages/${pageKey}/flatten/reset`, {
+      const res = await fetchAuthed(`/jobs/${currentJobId}/pages/${pageKey}/flatten/reset`, {
         method: 'POST',
       });
       if (!res.ok) {
@@ -1251,7 +1253,7 @@ async function createDraftJob() {
     formData.append('file', selectedFile);
     formData.append('mode', getSelectedParseMode());
 
-    const res = await fetch('/jobs', { method: 'POST', body: formData });
+    const res = await fetchAuthed('/jobs', { method: 'POST', body: formData });
     if (!res.ok) {
       const error = await safeParseJson(res);
       throw new Error((error && error.detail) || 'Failed to upload file');
@@ -1279,7 +1281,7 @@ async function pollDraftUntilReady() {
   if (!currentJobId) return;
 
   while (true) {
-    const res = await fetch(`/jobs/${currentJobId}`);
+    const res = await fetchAuthed(`/jobs/${currentJobId}`);
     if (!res.ok) {
       throw new Error('Failed to read draft status');
     }
@@ -1308,7 +1310,7 @@ async function pollDraftUntilReady() {
 }
 
 async function loadDraftPages() {
-  const cleanedRes = await fetch(`/jobs/${currentJobId}/cleaned`);
+  const cleanedRes = await fetchAuthed(`/jobs/${currentJobId}/cleaned`);
   if (!cleanedRes.ok) throw new Error('Failed to load draft pages');
 
   const cleanedData = await cleanedRes.json();
@@ -1318,7 +1320,7 @@ async function loadDraftPages() {
   pageList.forEach((fileName) => {
     pageImageVersion[fileName.replace('.png', '')] = 0;
   });
-  prefetchedPreviewSrcs.clear();
+  clearPreviewBlobCache();
   renderRows([]);
   renderCurrentPage();
 }
@@ -1332,7 +1334,7 @@ async function startProcessingFromDraft() {
     finishSave.textContent = 'Running OCR...';
     startElapsedTimer();
 
-    const res = await fetch(`/jobs/${currentJobId}/start`, { method: 'POST' });
+    const res = await fetchAuthed(`/jobs/${currentJobId}/start`, { method: 'POST' });
     if (!res.ok) {
       const error = await safeParseJson(res);
       throw new Error((error && error.detail) || 'Failed to start OCR');
@@ -1353,7 +1355,7 @@ async function pollJobUntilDone() {
   if (!currentJobId) return;
 
   while (true) {
-    const res = await fetch(`/jobs/${currentJobId}`);
+    const res = await fetchAuthed(`/jobs/${currentJobId}`);
     if (!res.ok) throw new Error('Failed to read job status');
 
     const status = await res.json();
@@ -1387,7 +1389,7 @@ async function pollJobUntilDone() {
 }
 
 async function loadResults() {
-  const cleanedRes = await fetch(`/jobs/${currentJobId}/cleaned`);
+  const cleanedRes = await fetchAuthed(`/jobs/${currentJobId}/cleaned`);
   if (!cleanedRes.ok) throw new Error('Failed to read processed pages');
 
   const cleanedData = await cleanedRes.json();
@@ -1402,7 +1404,7 @@ async function loadResults() {
   currentPageIndex = 0;
   rowKeyCounter = 1;
   pageImageVersion = {};
-  prefetchedPreviewSrcs.clear();
+  clearPreviewBlobCache();
 
   if (!pageList.length) {
     renderRows([]);
@@ -1416,8 +1418,8 @@ async function loadResults() {
 
   try {
     const [parsedAllRes, boundsAllRes] = await Promise.all([
-      fetch(`/jobs/${currentJobId}/parsed`),
-      fetch(`/jobs/${currentJobId}/bounds`)
+      fetchAuthed(`/jobs/${currentJobId}/parsed`),
+      fetchAuthed(`/jobs/${currentJobId}/bounds`)
     ]);
     if (parsedAllRes.ok) parsedAll = await parsedAllRes.json();
     if (boundsAllRes.ok) boundsAll = await boundsAllRes.json();
@@ -1432,14 +1434,14 @@ async function loadResults() {
     let bounds = boundsAll && Array.isArray(boundsAll[pageKey]) ? boundsAll[pageKey] : null;
 
     if (!rows) {
-      const parsedRes = await fetch(`/jobs/${currentJobId}/parsed/${pageKey}`);
+      const parsedRes = await fetchAuthed(`/jobs/${currentJobId}/parsed/${pageKey}`);
       if (!parsedRes.ok) {
         throw new Error(`Failed to read parsed rows for ${pageKey}`);
       }
       rows = await parsedRes.json();
     }
     if (!bounds) {
-      const boundsRes = await fetch(`/jobs/${currentJobId}/rows/${pageKey}/bounds`);
+      const boundsRes = await fetchAuthed(`/jobs/${currentJobId}/rows/${pageKey}/bounds`);
       bounds = boundsRes.ok ? await boundsRes.json() : [];
     }
 
@@ -1480,11 +1482,11 @@ async function loadAccountSummary() {
   accountNumberSummary.textContent = '-';
   try {
     let job = null;
-    const identityRes = await fetch(`/jobs/${currentJobId}/account-identity`);
+    const identityRes = await fetchAuthed(`/jobs/${currentJobId}/account-identity`);
     if (identityRes.ok) {
       job = await identityRes.json();
     } else {
-      const res = await fetch(`/jobs/${currentJobId}/diagnostics`);
+      const res = await fetchAuthed(`/jobs/${currentJobId}/diagnostics`);
       if (!res.ok) return;
       const diagnostics = await res.json();
       job = diagnostics && diagnostics.job ? diagnostics.job : {};
@@ -1594,22 +1596,7 @@ function renderCurrentPage() {
   nextPageBtn.disabled = currentPageIndex >= pageList.length - 1;
   syncPageSelect();
 
-  const src = `/jobs/${currentJobId}/preview/${pageKey}?v=${pageImageVersion[pageKey] || 0}`;
-  if (previewImage.dataset.src !== src) {
-    resetPreviewTransform();
-    previewImage.style.display = 'none';
-    previewImage.dataset.src = src;
-    previewImage.src = src;
-    if (previewImage.complete && previewImage.naturalWidth > 0) {
-      previewImage.style.display = 'block';
-      drawBoundingBoxes();
-      applyPreviewTransform();
-    }
-  } else {
-    previewImage.style.display = 'block';
-    drawBoundingBoxes();
-    applyPreviewTransform();
-  }
+  loadPreviewImageForPage(pageKey);
 
   const activeRow = parsedRows.find((r) => r.row_key === activeRowKey);
   if (activeRow && activeRow.page !== pageKey) {
@@ -1880,6 +1867,8 @@ function clearCanvas() {
 function setPreviewEmptyState() {
   previewImage.removeAttribute('src');
   previewImage.removeAttribute('data-src');
+  previewImage.removeAttribute('data-loaded-src');
+  previewImage.removeAttribute('data-requested-src');
   previewImage.style.display = 'none';
   resetPreviewTransform();
   previewCanvas.style.left = '0px';
@@ -1935,11 +1924,12 @@ function updateFlattenButtons() {
 
 async function refreshCurrentPageData(pageKey) {
   const [parsedRes, boundsRes] = await Promise.all([
-    fetch(`/jobs/${currentJobId}/parsed/${pageKey}`),
-    fetch(`/jobs/${currentJobId}/rows/${pageKey}/bounds`)
+    fetchAuthed(`/jobs/${currentJobId}/parsed/${pageKey}`),
+    fetchAuthed(`/jobs/${currentJobId}/rows/${pageKey}/bounds`)
   ]);
 
   pageImageVersion[pageKey] = (pageImageVersion[pageKey] || 0) + 1;
+  clearPreviewCacheForPage(pageKey);
 
   if (!parsedRes.ok) {
     boundsByPage[pageKey] = [];
@@ -2709,7 +2699,7 @@ function resetResults() {
   currentPageIndex = 0;
   rowKeyCounter = 1;
   pageImageVersion = {};
-  prefetchedPreviewSrcs.clear();
+  clearPreviewBlobCache();
   flattenMode = false;
   flattenPoints = [];
   flattenBusy = false;
@@ -2727,15 +2717,71 @@ function buildPreviewSrc(pageKey) {
   return `/jobs/${currentJobId}/preview/${pageKey}?v=${pageImageVersion[pageKey] || 0}`;
 }
 
+function clearPreviewBlobCache() {
+  prefetchedPreviewSrcs.clear();
+  for (const url of previewBlobUrlCache.values()) {
+    URL.revokeObjectURL(url);
+  }
+  previewBlobUrlCache.clear();
+}
+
+function clearPreviewCacheForPage(pageKey) {
+  const marker = `/preview/${pageKey}?`;
+  for (const [src, objectUrl] of previewBlobUrlCache.entries()) {
+    if (!src.includes(marker)) continue;
+    URL.revokeObjectURL(objectUrl);
+    previewBlobUrlCache.delete(src);
+    prefetchedPreviewSrcs.delete(src);
+  }
+}
+
+async function getPreviewBlobUrl(src) {
+  const cached = previewBlobUrlCache.get(src);
+  if (cached) return cached;
+  const res = await fetchAuthed(src);
+  if (!res.ok) {
+    throw new Error(`Preview load failed (${res.status})`);
+  }
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  previewBlobUrlCache.set(src, objectUrl);
+  return objectUrl;
+}
+
+async function loadPreviewImageForPage(pageKey) {
+  if (!currentJobId) return;
+  const src = buildPreviewSrc(pageKey);
+  if (previewImage.dataset.loadedSrc === src && previewImage.src) {
+    previewImage.style.display = 'block';
+    drawBoundingBoxes();
+    applyPreviewTransform();
+    return;
+  }
+  resetPreviewTransform();
+  previewImage.style.display = 'none';
+  previewImage.dataset.requestedSrc = src;
+  try {
+    const objectUrl = await getPreviewBlobUrl(src);
+    if (previewImage.dataset.requestedSrc !== src) return;
+    previewImage.dataset.loadedSrc = src;
+    previewImage.src = objectUrl;
+  } catch (err) {
+    if (previewImage.dataset.requestedSrc === src) {
+      setPreviewEmptyState();
+    }
+    console.warn(err.message || 'Failed to load preview image');
+  }
+}
+
 function prefetchPreviewPageByIndex(idx) {
   if (!currentJobId || idx < 0 || idx >= pageList.length) return;
   const pageKey = pageList[idx].replace('.png', '');
   const src = buildPreviewSrc(pageKey);
   if (prefetchedPreviewSrcs.has(src)) return;
   prefetchedPreviewSrcs.add(src);
-  const img = new Image();
-  img.decoding = 'async';
-  img.src = src;
+  getPreviewBlobUrl(src).catch(() => {
+    prefetchedPreviewSrcs.delete(src);
+  });
 }
 
 function prefetchPreviewNeighbors() {

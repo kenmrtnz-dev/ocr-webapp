@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import logging
 from typing import Dict, List
 
 import cv2
@@ -35,11 +36,12 @@ celery = Celery(
     broker=os.getenv("CELERY_BROKER_URL"),
     backend=os.getenv("CELERY_RESULT_BACKEND"),
 )
+logger = logging.getLogger(__name__)
 
 
 @celery.task
 def prepare_draft(job_id: str):
-    print(f"[WORKER] Preparing draft {job_id}")
+    logger.info("[WORKER] Preparing draft %s", job_id)
 
     job_dir = os.path.join(DATA_DIR, "jobs", job_id)
     input_pdf = os.path.join(job_dir, "input", "document.pdf")
@@ -101,7 +103,7 @@ def prepare_draft(job_id: str):
             pages=len(page_files),
             ocr_backend=OCR_BACKEND,
         )
-        print(f"[WORKER] Draft ready {job_id}")
+        logger.info("[WORKER] Draft ready %s", job_id)
         return {"pages": len(page_files)}
     except Exception as exc:
         update_status(
@@ -112,13 +114,13 @@ def prepare_draft(job_id: str):
             message=str(exc),
             ocr_backend=OCR_BACKEND,
         )
-        print(f"[WORKER] Draft failed {job_id}: {exc}")
+        logger.exception("[WORKER] Draft failed %s: %s", job_id, exc)
         raise
 
 
 @celery.task
 def process_pdf(job_id: str, parse_mode: str = "text"):
-    print(f"[WORKER] Starting job {job_id}")
+    logger.info("[WORKER] Starting job %s", job_id)
     parse_mode = _normalize_parse_mode(parse_mode)
     reload_profiles()
 
@@ -486,10 +488,10 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
         try:
             sync_job_results(job_id, parsed_output, bounds_output, diagnostics)
         except Exception as exc:
-            print(f"[WORKER] Warning: sync_job_results failed for {job_id}: {exc}")
+            logger.warning("[WORKER] sync_job_results failed for %s: %s", job_id, exc, exc_info=exc)
 
         report("done", "completed", 100, pages=len(page_files), ocr_backend=OCR_BACKEND)
-        print(f"[WORKER] Finished job {job_id}")
+        logger.info("[WORKER] Finished job %s", job_id)
         return {"pages": len(page_files)}
     except Exception as exc:
         fail_payload = {"parse_mode": parse_mode, "ocr_backend": OCR_BACKEND}
@@ -502,7 +504,7 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
             message=str(exc),
             **fail_payload,
         )
-        print(f"[WORKER] Failed job {job_id}: {exc}")
+        logger.exception("[WORKER] Failed job %s: %s", job_id, exc)
         raise
 
 
@@ -520,7 +522,7 @@ def update_status(job_dir, status, **extra):
         job_id = os.path.basename(job_dir.rstrip("/"))
         upsert_job_status(job_id, data)
     except Exception as exc:
-        print(f"[WORKER] Warning: upsert_job_status failed: {exc}")
+        logger.warning("[WORKER] upsert_job_status failed for %s: %s", job_dir, exc, exc_info=exc)
 
 
 def _normalize_parse_mode(mode: str | None) -> str:
@@ -555,7 +557,8 @@ def _read_preprocess_config(job_dir: str) -> Dict:
     try:
         with open(cfg_path) as f:
             return json.load(f)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to read preprocess config for %s", job_dir, exc_info=exc)
         return {}
 
 

@@ -30,6 +30,8 @@ DEFAULT_ADMIN_EMAIL = os.getenv("DEFAULT_ADMIN_EMAIL", "admin@example.com")
 DEFAULT_ADMIN_PASSWORD = os.getenv("DEFAULT_ADMIN_PASSWORD", "admin123")
 
 bearer_scheme = HTTPBearer(auto_error=False)
+DEV_ENV_NAMES = {"dev", "local", "test"}
+WEAK_JWT_SECRETS = {"", "dev-change-me", "change-me", "changeme", "secret", "default"}
 
 
 @dataclass
@@ -141,6 +143,38 @@ def require_role(*roles: str):
         return user
 
     return _guard
+
+
+def _parse_bool(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def is_non_dev_env(app_env: Optional[str]) -> bool:
+    normalized = str(app_env or "").strip().lower()
+    if not normalized:
+        normalized = "dev"
+    return normalized not in DEV_ENV_NAMES
+
+
+def is_weak_jwt_secret(secret: Optional[str]) -> bool:
+    normalized = str(secret or "").strip().lower()
+    if normalized in WEAK_JWT_SECRETS:
+        return True
+    return len(str(secret or "").strip()) < 16
+
+
+def should_seed_default_users(app_env: Optional[str], explicit_env: Optional[str]) -> bool:
+    parsed = _parse_bool(explicit_env)
+    if parsed is not None:
+        return parsed
+    return not is_non_dev_env(app_env)
 
 
 def ensure_default_users():

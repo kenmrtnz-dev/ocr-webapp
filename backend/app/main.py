@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 import uuid, os, json
+import logging
 from typing import List, Dict, Optional
 import shutil
 import cv2
@@ -21,11 +22,15 @@ from app.statement_parser import parse_page_with_profile_fallback, is_transactio
 from app.image_cleaner import clean_page
 from app.auth_service import (
     AuthUser,
+    JWT_SECRET,
     ensure_default_users,
     get_current_user,
     hash_password,
+    is_non_dev_env,
+    is_weak_jwt_secret,
     issue_token,
     require_role,
+    should_seed_default_users,
     verify_password,
 )
 from app.blob_store import write_blob, blob_abs_path
@@ -52,6 +57,7 @@ DATA_DIR = os.getenv("DATA_DIR", "./data")
 PREVIEW_MAX_PIXELS = int(os.getenv("PREVIEW_MAX_PIXELS", "6000000"))
 
 app = FastAPI(title="OCR Passbook / SOA API")
+logger = logging.getLogger(__name__)
 
 
 def _normalize_parse_mode(mode: str | None) -> str:
@@ -63,8 +69,12 @@ def _startup_db_bootstrap():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(os.path.join(DATA_DIR, "jobs"), exist_ok=True)
     os.makedirs(os.path.join(DATA_DIR, "config"), exist_ok=True)
+    app_env = os.getenv("APP_ENV", "dev")
+    if is_non_dev_env(app_env) and is_weak_jwt_secret(JWT_SECRET):
+        raise RuntimeError("Weak/default JWT_SECRET is not allowed outside dev/local/test environments")
     Base.metadata.create_all(bind=engine)
-    ensure_default_users()
+    if should_seed_default_users(app_env, os.getenv("SEED_DEFAULT_USERS")):
+        ensure_default_users()
 
 # ---------------------------
 # Static files & templates
@@ -132,6 +142,50 @@ def health():
     return {"ok": True}
 
 
+def _get_job_record_or_404(job_id: uuid.UUID) -> JobRecord:
+    db = SessionLocal()
+    try:
+        job = db.scalar(select(JobRecord).where(JobRecord.id == job_id))
+        if not job:
+            raise HTTPException(status_code=404, detail="job_not_found")
+        return job
+    finally:
+        db.close()
+
+
+def _authorize_submission_access(submission: Submission, user: AuthUser, write: bool = False):
+    if user.role == "admin":
+        return
+    if user.role == "credit_evaluator":
+        if submission.assigned_evaluator_id != user.id:
+            raise HTTPException(status_code=403, detail="forbidden_submission")
+        return
+    if user.role == "agent":
+        if write:
+            raise HTTPException(status_code=403, detail="forbidden_submission_write")
+        if submission.agent_id != user.id:
+            raise HTTPException(status_code=403, detail="forbidden_submission")
+        return
+    raise HTTPException(status_code=403, detail="forbidden_role")
+
+
+def _authorize_job_access(job: JobRecord, user: AuthUser, write: bool = False):
+    if job.submission_id is None:
+        if user.role not in {"credit_evaluator", "admin"}:
+            raise HTTPException(status_code=403, detail="forbidden_standalone_job")
+        return
+
+    submission = None
+    db = SessionLocal()
+    try:
+        submission = db.scalar(select(Submission).where(Submission.id == job.submission_id))
+        if not submission:
+            raise HTTPException(status_code=404, detail="submission_not_found")
+    finally:
+        db.close()
+    _authorize_submission_access(submission, user, write=write)
+
+
 def _read_submission_original_filename(submission_payload: Dict) -> str:
     job_id = str((submission_payload or {}).get("current_job_id") or "").strip()
     if not job_id:
@@ -144,8 +198,8 @@ def _read_submission_original_filename(submission_payload: Dict) -> str:
             name = str((meta or {}).get("original_filename") or "").strip()
             if name:
                 return name
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to read submission meta filename: %s", meta_path, exc_info=exc)
     input_pdf_key = str((submission_payload or {}).get("input_pdf_key") or "").strip()
     if input_pdf_key:
         parts = [p for p in input_pdf_key.split("/") if p]
@@ -249,11 +303,8 @@ def admin_create_user(payload: AdminCreateUserRequest, user: AuthUser = Depends(
 
 
 @app.delete("/admin/users/{user_id}")
-def admin_delete_user(user_id: str, user: AuthUser = Depends(require_role("admin"))):
-    try:
-        target_id = uuid.UUID(user_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="invalid_user_id")
+def admin_delete_user(user_id: uuid.UUID, user: AuthUser = Depends(require_role("admin"))):
+    target_id = user_id
     if target_id == user.id:
         raise HTTPException(status_code=400, detail="cannot_delete_self")
 
@@ -278,15 +329,11 @@ def admin_delete_user(user_id: str, user: AuthUser = Depends(require_role("admin
 
 @app.patch("/admin/users/{user_id}/active")
 def admin_set_user_active(
-    user_id: str,
+    user_id: uuid.UUID,
     payload: AdminSetUserActiveRequest,
     user: AuthUser = Depends(require_role("admin")),
 ):
-    try:
-        target_id = uuid.UUID(user_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="invalid_user_id")
-
+    target_id = user_id
     db = SessionLocal()
     try:
         row = db.scalar(select(User).where(User.id == target_id))
@@ -343,8 +390,8 @@ def admin_clear_submissions(user: AuthUser = Depends(require_role("admin"))):
                     shutil.rmtree(path, ignore_errors=True)
                 else:
                     os.remove(path)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Failed to clear path during admin reset: %s", path, exc_info=exc)
         os.makedirs(root, exist_ok=True)
 
     return {"ok": True, "cleared": counts}
@@ -354,12 +401,17 @@ def admin_clear_submissions(user: AuthUser = Depends(require_role("admin"))):
 # Job creation
 # ---------------------------
 @app.post("/jobs")
-async def create_job(file: UploadFile = File(...), mode: str = Form("text")):
+async def create_job(
+    file: UploadFile = File(...),
+    mode: str = Form("text"),
+    user: AuthUser = Depends(require_role("credit_evaluator", "admin")),
+):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="PDF only")
     parse_mode = _normalize_parse_mode(mode)
 
-    job_id = str(uuid.uuid4())
+    job_uuid = uuid.uuid4()
+    job_id = str(job_uuid)
     job_dir = os.path.join(DATA_DIR, "jobs", job_id)
     input_dir = os.path.join(job_dir, "input")
 
@@ -373,16 +425,16 @@ async def create_job(file: UploadFile = File(...), mode: str = Form("text")):
     with open(os.path.join(job_dir, "status.json"), "w") as f:
         json.dump({"status": "queued", "step": "queued", "progress": 0, "parse_mode": parse_mode}, f)
 
-    print(f"[API] Created job {job_id}")
+    logger.info("Created standalone job %s by user %s (%s)", job_id, user.email, user.role)
 
     process_pdf.delay(job_id, parse_mode)
     db = SessionLocal()
     try:
-        existing = db.scalar(select(JobRecord).where(JobRecord.id == uuid.UUID(job_id)))
+        existing = db.scalar(select(JobRecord).where(JobRecord.id == job_uuid))
         if not existing:
             db.add(
                 JobRecord(
-                    id=uuid.UUID(job_id),
+                    id=job_uuid,
                     submission_id=None,
                     status="queued",
                     step="queued",
@@ -398,12 +450,17 @@ async def create_job(file: UploadFile = File(...), mode: str = Form("text")):
 
 
 @app.post("/jobs/draft")
-async def create_draft_job(file: UploadFile = File(...), mode: str = Form("text")):
+async def create_draft_job(
+    file: UploadFile = File(...),
+    mode: str = Form("text"),
+    user: AuthUser = Depends(require_role("credit_evaluator", "admin")),
+):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="PDF only")
     parse_mode = _normalize_parse_mode(mode)
 
-    job_id = str(uuid.uuid4())
+    job_uuid = uuid.uuid4()
+    job_id = str(job_uuid)
     job_dir = os.path.join(DATA_DIR, "jobs", job_id)
     input_dir = os.path.join(job_dir, "input")
     pages_dir = os.path.join(job_dir, "pages")
@@ -436,11 +493,11 @@ async def create_draft_job(file: UploadFile = File(...), mode: str = Form("text"
     prepare_draft.delay(job_id)
     db = SessionLocal()
     try:
-        existing = db.scalar(select(JobRecord).where(JobRecord.id == uuid.UUID(job_id)))
+        existing = db.scalar(select(JobRecord).where(JobRecord.id == job_uuid))
         if not existing:
             db.add(
                 JobRecord(
-                    id=uuid.UUID(job_id),
+                    id=job_uuid,
                     submission_id=None,
                     status="queued",
                     step="draft_queued",
@@ -451,12 +508,16 @@ async def create_draft_job(file: UploadFile = File(...), mode: str = Form("text"
             db.commit()
     finally:
         db.close()
+    logger.info("Created standalone draft job %s by user %s (%s)", job_id, user.email, user.role)
     return {"job_id": job_id}
 
 
 @app.post("/jobs/{job_id}/start")
-def start_job_from_draft(job_id: str):
-    job_dir = os.path.join(DATA_DIR, "jobs", job_id)
+def start_job_from_draft(job_id: uuid.UUID, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=True)
+    job_id_str = str(job_id)
+    job_dir = os.path.join(DATA_DIR, "jobs", job_id_str)
     input_pdf = os.path.join(job_dir, "input", "document.pdf")
     if not os.path.exists(input_pdf):
         raise HTTPException(status_code=404, detail="Draft job not found")
@@ -479,14 +540,14 @@ def start_job_from_draft(job_id: str):
             current_status = ""
 
     if current_status in {"queued", "processing"}:
-        return {"job_id": job_id, "started": False, "parse_mode": parse_mode}
+        return {"job_id": job_id_str, "started": False, "parse_mode": parse_mode}
 
     with open(status_path, "w") as f:
         json.dump({"status": "queued", "step": "queued", "progress": 0, "parse_mode": parse_mode}, f)
 
     db = SessionLocal()
     try:
-        db_job = db.scalar(select(JobRecord).where(JobRecord.id == uuid.UUID(job_id)))
+        db_job = db.scalar(select(JobRecord).where(JobRecord.id == job_id))
         if db_job:
             db_job.status = "processing"
             db_job.step = "queued"
@@ -499,8 +560,8 @@ def start_job_from_draft(job_id: str):
     finally:
         db.close()
 
-    process_pdf.delay(job_id, parse_mode)
-    return {"job_id": job_id, "started": True, "parse_mode": parse_mode}
+    process_pdf.delay(job_id_str, parse_mode)
+    return {"job_id": job_id_str, "started": True, "parse_mode": parse_mode}
 
 
 class EvaluatorTransactionRow(BaseModel):
@@ -548,8 +609,8 @@ async def agent_create_submission(
     try:
         with open(os.path.join(job_dir, "meta.json"), "w") as f:
             json.dump({"original_filename": file.filename}, f)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to write meta.json for submission job %s", job_id, exc_info=exc)
     status_path = os.path.join(job_dir, "status.json")
     with open(status_path, "w") as f:
         json.dump({"status": "for_review", "step": "for_review", "progress": 0, "parse_mode": parse_mode}, f)
@@ -569,9 +630,9 @@ def agent_list_submissions(user: AuthUser = Depends(require_role("agent"))):
 
 
 @app.get("/agent/submissions/{submission_id}")
-def agent_get_submission(submission_id: str, user: AuthUser = Depends(require_role("agent"))):
+def agent_get_submission(submission_id: uuid.UUID, user: AuthUser = Depends(require_role("agent"))):
     try:
-        sub = get_submission_for_user(uuid.UUID(submission_id), user)
+        sub = get_submission_for_user(submission_id, user)
     except ValueError:
         raise HTTPException(status_code=404, detail="submission_not_found")
     except PermissionError:
@@ -580,9 +641,9 @@ def agent_get_submission(submission_id: str, user: AuthUser = Depends(require_ro
 
 
 @app.get("/agent/submissions/{submission_id}/status")
-def agent_submission_status(submission_id: str, user: AuthUser = Depends(require_role("agent"))):
+def agent_submission_status(submission_id: uuid.UUID, user: AuthUser = Depends(require_role("agent"))):
     try:
-        sub = get_submission_for_user(uuid.UUID(submission_id), user)
+        sub = get_submission_for_user(submission_id, user)
     except ValueError:
         raise HTTPException(status_code=404, detail="submission_not_found")
     except PermissionError:
@@ -610,9 +671,9 @@ def evaluator_list_submissions(
 
 
 @app.post("/evaluator/submissions/{submission_id}/assign")
-def evaluator_assign_submission(submission_id: str, user: AuthUser = Depends(require_role("credit_evaluator"))):
+def evaluator_assign_submission(submission_id: uuid.UUID, user: AuthUser = Depends(require_role("credit_evaluator"))):
     try:
-        sub = assign_submission_to_evaluator(uuid.UUID(submission_id), user)
+        sub = assign_submission_to_evaluator(submission_id, user)
     except ValueError:
         raise HTTPException(status_code=404, detail="submission_not_found")
     except PermissionError as exc:
@@ -621,9 +682,9 @@ def evaluator_assign_submission(submission_id: str, user: AuthUser = Depends(req
 
 
 @app.get("/evaluator/submissions/{submission_id}")
-def evaluator_get_submission(submission_id: str, user: AuthUser = Depends(require_role("credit_evaluator"))):
+def evaluator_get_submission(submission_id: uuid.UUID, user: AuthUser = Depends(require_role("credit_evaluator"))):
     try:
-        sub = get_submission_for_user(uuid.UUID(submission_id), user)
+        sub = get_submission_for_user(submission_id, user)
     except ValueError:
         raise HTTPException(status_code=404, detail="submission_not_found")
     except PermissionError:
@@ -669,13 +730,13 @@ def evaluator_get_submission(submission_id: str, user: AuthUser = Depends(requir
 
 @app.patch("/evaluator/submissions/{submission_id}/transactions")
 def evaluator_patch_transactions(
-    submission_id: str,
+    submission_id: uuid.UUID,
     payload: EvaluatorTransactionsPatch,
     user: AuthUser = Depends(require_role("credit_evaluator")),
 ):
     try:
         summary = persist_evaluator_transactions(
-            submission_id=uuid.UUID(submission_id),
+            submission_id=submission_id,
             evaluator_user=user,
             rows=[r.model_dump() for r in payload.rows],
         )
@@ -689,9 +750,9 @@ def evaluator_patch_transactions(
 
 
 @app.post("/evaluator/submissions/{submission_id}/analyze")
-def evaluator_analyze_submission(submission_id: str, user: AuthUser = Depends(require_role("credit_evaluator"))):
+def evaluator_analyze_submission(submission_id: uuid.UUID, user: AuthUser = Depends(require_role("credit_evaluator"))):
     try:
-        sub = get_submission_for_user(uuid.UUID(submission_id), user)
+        sub = get_submission_for_user(submission_id, user)
     except ValueError:
         raise HTTPException(status_code=404, detail="submission_not_found")
     except PermissionError:
@@ -714,9 +775,9 @@ def evaluator_analyze_submission(submission_id: str, user: AuthUser = Depends(re
 
 
 @app.post("/evaluator/submissions/{submission_id}/reports")
-def evaluator_generate_report(submission_id: str, user: AuthUser = Depends(require_role("credit_evaluator"))):
+def evaluator_generate_report(submission_id: uuid.UUID, user: AuthUser = Depends(require_role("credit_evaluator"))):
     try:
-        sub = get_submission_for_user(uuid.UUID(submission_id), user)
+        sub = get_submission_for_user(submission_id, user)
     except ValueError:
         raise HTTPException(status_code=404, detail="submission_not_found")
     except PermissionError:
@@ -740,10 +801,10 @@ def evaluator_generate_report(submission_id: str, user: AuthUser = Depends(requi
 
 
 @app.get("/evaluator/reports/{report_id}/download")
-def evaluator_download_report(report_id: str, user: AuthUser = Depends(require_role("credit_evaluator"))):
+def evaluator_download_report(report_id: uuid.UUID, user: AuthUser = Depends(require_role("credit_evaluator"))):
     db = SessionLocal()
     try:
-        report = db.scalar(select(Report).where(Report.id == uuid.UUID(report_id)))
+        report = db.scalar(select(Report).where(Report.id == report_id))
         if not report:
             raise HTTPException(status_code=404, detail="report_not_found")
         sub = db.scalar(select(Submission).where(Submission.id == report.submission_id))
@@ -758,9 +819,9 @@ def evaluator_download_report(report_id: str, user: AuthUser = Depends(require_r
 
 
 @app.post("/evaluator/submissions/{submission_id}/mark-summary-ready")
-def evaluator_mark_summary_ready(submission_id: str, user: AuthUser = Depends(require_role("credit_evaluator"))):
+def evaluator_mark_summary_ready(submission_id: uuid.UUID, user: AuthUser = Depends(require_role("credit_evaluator"))):
     try:
-        sub = set_submission_summary_ready(uuid.UUID(submission_id), user)
+        sub = set_submission_summary_ready(submission_id, user)
     except ValueError as exc:
         detail = str(exc)
         code = 404 if detail == "submission_not_found" else 400
@@ -771,9 +832,9 @@ def evaluator_mark_summary_ready(submission_id: str, user: AuthUser = Depends(re
 
 
 @app.post("/evaluator/submissions/{submission_id}/mark-summary-generated")
-def evaluator_mark_summary_generated(submission_id: str, user: AuthUser = Depends(require_role("credit_evaluator"))):
+def evaluator_mark_summary_generated(submission_id: uuid.UUID, user: AuthUser = Depends(require_role("credit_evaluator"))):
     try:
-        sub = set_submission_summary_generated(uuid.UUID(submission_id), user)
+        sub = set_submission_summary_generated(submission_id, user)
     except ValueError as exc:
         detail = str(exc)
         code = 404 if detail == "submission_not_found" else 400
@@ -787,8 +848,11 @@ def evaluator_mark_summary_generated(submission_id: str, user: AuthUser = Depend
 # Job status
 # ---------------------------
 @app.get("/jobs/{job_id}")
-def job_status(job_id: str):
-    status_path = os.path.join(DATA_DIR, "jobs", job_id, "status.json")
+def job_status(job_id: uuid.UUID, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=False)
+    job_id_str = str(job_id)
+    status_path = os.path.join(DATA_DIR, "jobs", job_id_str, "status.json")
 
     if not os.path.exists(status_path):
         raise HTTPException(status_code=404, detail="Job not found")
@@ -806,9 +870,11 @@ def job_status(job_id: str):
 # ------------
 
 @app.get("/jobs/{job_id}/cleaned")
-def list_cleaned(job_id: str):
-    print("HIT /cleaned endpoint")
-    cleaned_dir = os.path.join(DATA_DIR, "jobs", job_id, "cleaned")
+def list_cleaned(job_id: uuid.UUID, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=False)
+    job_id_str = str(job_id)
+    cleaned_dir = os.path.join(DATA_DIR, "jobs", job_id_str, "cleaned")
     
     # 🔥 IMPORTANT: do NOT 404
     if not os.path.exists(cleaned_dir):
@@ -821,7 +887,7 @@ def list_cleaned(job_id: str):
     if files:
         return {"pages": files}
 
-    parsed_rows_path = os.path.join(DATA_DIR, "jobs", job_id, "result", "parsed_rows.json")
+    parsed_rows_path = os.path.join(DATA_DIR, "jobs", job_id_str, "result", "parsed_rows.json")
     if os.path.exists(parsed_rows_path):
         try:
             with open(parsed_rows_path) as f:
@@ -829,17 +895,20 @@ def list_cleaned(job_id: str):
             page_keys = sorted(parsed.keys())
             synthetic = [f"{key}.png" for key in page_keys]
             return {"pages": synthetic}
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to build synthetic cleaned pages for job %s", job_id_str, exc_info=exc)
 
     return {"pages": files}
 
 @app.get("/jobs/{job_id}/cleaned/{filename}")
-def get_cleaned(job_id: str, filename: str):
-    path = os.path.join(DATA_DIR, "jobs", job_id, "cleaned", filename)
+def get_cleaned(job_id: uuid.UUID, filename: str, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=False)
+    job_id_str = str(job_id)
+    path = os.path.join(DATA_DIR, "jobs", job_id_str, "cleaned", filename)
 
     if not os.path.exists(path):
-        generated = _generate_preview_page_if_missing(job_id, filename, path)
+        generated = _generate_preview_page_if_missing(job_id_str, filename, path)
         if not generated:
             raise HTTPException(status_code=404, detail="Image not found")
 
@@ -847,10 +916,13 @@ def get_cleaned(job_id: str, filename: str):
 
 
 @app.get("/jobs/{job_id}/preview/{page}")
-def get_page_preview(job_id: str, page: str):
+def get_page_preview(job_id: uuid.UUID, page: str, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=False)
+    job_id_str = str(job_id)
     page_name = page if page.startswith("page_") else f"page_{page}"
     filename = f"{page_name}.png" if not page_name.endswith(".png") else page_name
-    job_dir = os.path.join(DATA_DIR, "jobs", job_id)
+    job_dir = os.path.join(DATA_DIR, "jobs", job_id_str)
     cleaned_path = os.path.join(job_dir, "cleaned", filename)
     preview_dir = os.path.join(job_dir, "preview")
     preview_path = os.path.join(preview_dir, filename)
@@ -859,15 +931,17 @@ def get_page_preview(job_id: str, page: str):
         return FileResponse(cleaned_path, media_type="image/png")
 
     if not os.path.exists(preview_path):
-        ok = _generate_preview_page_if_missing(job_id, filename, preview_path)
+        ok = _generate_preview_page_if_missing(job_id_str, filename, preview_path)
         if not ok:
             raise HTTPException(status_code=404, detail="Preview page not found")
 
     return FileResponse(preview_path, media_type="image/png")
 
 @app.get("/jobs/{job_id}/ocr/{page}")
-def get_ocr(job_id: str, page: str):
-    path = os.path.join(DATA_DIR, "jobs", job_id, "ocr", f"{page}.json")
+def get_ocr(job_id: uuid.UUID, page: str, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=False)
+    path = os.path.join(DATA_DIR, "jobs", str(job_id), "ocr", f"{page}.json")
 
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="OCR not ready")
@@ -877,8 +951,10 @@ def get_ocr(job_id: str, page: str):
     
 
 @app.get("/jobs/{job_id}/rows/{page}/bounds")
-def get_row_bounds(job_id: str, page: str):
-    path = os.path.join(DATA_DIR, "jobs", job_id, "result", "bounds.json")
+def get_row_bounds(job_id: uuid.UUID, page: str, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=False)
+    path = os.path.join(DATA_DIR, "jobs", str(job_id), "result", "bounds.json")
 
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Row bounds not ready")
@@ -890,8 +966,10 @@ def get_row_bounds(job_id: str, page: str):
 
 
 @app.get("/jobs/{job_id}/bounds")
-def get_all_row_bounds(job_id: str):
-    path = os.path.join(DATA_DIR, "jobs", job_id, "result", "bounds.json")
+def get_all_row_bounds(job_id: uuid.UUID, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=False)
+    path = os.path.join(DATA_DIR, "jobs", str(job_id), "result", "bounds.json")
 
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Row bounds not ready")
@@ -900,7 +978,9 @@ def get_all_row_bounds(job_id: str):
         return json.load(f)
 
 @app.get("/jobs/{job_id}/rows/{page}/{row}")
-def get_row_image(job_id: str, page: str, row: str):
+def get_row_image(job_id: uuid.UUID, page: str, row: str, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=False)
     raise HTTPException(
         status_code=410,
         detail="Row-based processing removed. Use /jobs/{job_id}/parsed/{page}."
@@ -910,22 +990,29 @@ def get_row_image(job_id: str, page: str, row: str):
 
 
 @app.get("/jobs/{job_id}/ocr/rows")
-def get_row_ocr(job_id: str):
+def get_row_ocr(job_id: uuid.UUID, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=False)
     raise HTTPException(
         status_code=410,
         detail="Row-based processing removed. Use /jobs/{job_id}/ocr/{page}."
     )
 
 @app.get("/jobs/{job_id}/rows/{page}")
-def list_rows(job_id: str, page: str):
+def list_rows(job_id: uuid.UUID, page: str, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=False)
     raise HTTPException(
         status_code=410,
         detail="Row-based processing removed. Use /jobs/{job_id}/parsed/{page}."
     )
 
 @app.get("/jobs/{job_id}/parsed/{page}")
-def get_parsed_rows(job_id: str, page: str):
-    path = os.path.join(DATA_DIR, "jobs", job_id, "result", "parsed_rows.json")
+def get_parsed_rows(job_id: uuid.UUID, page: str, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=False)
+    job_id_str = str(job_id)
+    path = os.path.join(DATA_DIR, "jobs", job_id_str, "result", "parsed_rows.json")
 
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Parsed rows not ready")
@@ -935,7 +1022,7 @@ def get_parsed_rows(job_id: str, page: str):
 
     page_rows = data.get(page, [])
     if _rows_need_description_backfill(page_rows):
-        page_rows = _backfill_page_descriptions(job_id, page, page_rows)
+        page_rows = _backfill_page_descriptions(job_id_str, page, page_rows)
         data[page] = page_rows
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
@@ -944,8 +1031,10 @@ def get_parsed_rows(job_id: str, page: str):
 
 
 @app.get("/jobs/{job_id}/parsed")
-def get_all_parsed_rows(job_id: str):
-    path = os.path.join(DATA_DIR, "jobs", job_id, "result", "parsed_rows.json")
+def get_all_parsed_rows(job_id: uuid.UUID, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=False)
+    path = os.path.join(DATA_DIR, "jobs", str(job_id), "result", "parsed_rows.json")
 
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Parsed rows not ready")
@@ -955,8 +1044,11 @@ def get_all_parsed_rows(job_id: str):
 
 
 @app.get("/jobs/{job_id}/diagnostics")
-def get_parse_diagnostics(job_id: str):
-    path = os.path.join(DATA_DIR, "jobs", job_id, "result", "parse_diagnostics.json")
+def get_parse_diagnostics(job_id: uuid.UUID, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=False)
+    job_id_str = str(job_id)
+    path = os.path.join(DATA_DIR, "jobs", job_id_str, "result", "parse_diagnostics.json")
 
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Diagnostics not ready")
@@ -964,13 +1056,16 @@ def get_parse_diagnostics(job_id: str):
     with open(path) as f:
         diagnostics = json.load(f)
 
-    diagnostics = _backfill_job_account_identity(job_id, diagnostics, path)
+    diagnostics = _backfill_job_account_identity(job_id_str, diagnostics, path)
     return diagnostics
 
 
 @app.get("/jobs/{job_id}/account-identity")
-def get_account_identity(job_id: str):
-    path = os.path.join(DATA_DIR, "jobs", job_id, "result", "parse_diagnostics.json")
+def get_account_identity(job_id: uuid.UUID, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=False)
+    job_id_str = str(job_id)
+    path = os.path.join(DATA_DIR, "jobs", job_id_str, "result", "parse_diagnostics.json")
 
     diagnostics: Dict = {"job": {}, "pages": {}}
     if os.path.exists(path):
@@ -980,7 +1075,7 @@ def get_account_identity(job_id: str):
         except Exception:
             diagnostics = {"job": {}, "pages": {}}
 
-    diagnostics = _backfill_job_account_identity(job_id, diagnostics, path if os.path.exists(path) else None)
+    diagnostics = _backfill_job_account_identity(job_id_str, diagnostics, path if os.path.exists(path) else None)
     job = diagnostics.get("job", {}) if isinstance(diagnostics, dict) else {}
     return {
         "account_name": job.get("account_name"),
@@ -1004,11 +1099,14 @@ class FlattenRequest(BaseModel):
 
 
 @app.post("/jobs/{job_id}/pages/{page}/flatten")
-def flatten_page(job_id: str, page: str, payload: FlattenRequest):
+def flatten_page(job_id: uuid.UUID, page: str, payload: FlattenRequest, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=True)
+    job_id_str = str(job_id)
     if len(payload.points) != 4:
         raise HTTPException(status_code=400, detail="Exactly 4 points are required")
 
-    cleaned_path = os.path.join(DATA_DIR, "jobs", job_id, "cleaned", f"{page}.png")
+    cleaned_path = os.path.join(DATA_DIR, "jobs", job_id_str, "cleaned", f"{page}.png")
     if not os.path.exists(cleaned_path):
         raise HTTPException(status_code=404, detail="Page image not found")
 
@@ -1021,23 +1119,26 @@ def flatten_page(job_id: str, page: str, payload: FlattenRequest):
         raise HTTPException(status_code=400, detail="Invalid corner points")
 
     cv2.imwrite(cleaned_path, warped)
-    if _should_reparse_after_page_edit(job_id):
-        _reparse_single_page(job_id, page)
+    if _should_reparse_after_page_edit(job_id_str):
+        _reparse_single_page(job_id_str, page)
     return {"ok": True, "page": page}
 
 
 @app.post("/jobs/{job_id}/pages/{page}/flatten/reset")
-def reset_flatten_page(job_id: str, page: str):
-    raw_path = os.path.join(DATA_DIR, "jobs", job_id, "pages", f"{page}.png")
-    cleaned_path = os.path.join(DATA_DIR, "jobs", job_id, "cleaned", f"{page}.png")
+def reset_flatten_page(job_id: uuid.UUID, page: str, user: AuthUser = Depends(get_current_user)):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=True)
+    job_id_str = str(job_id)
+    raw_path = os.path.join(DATA_DIR, "jobs", job_id_str, "pages", f"{page}.png")
+    cleaned_path = os.path.join(DATA_DIR, "jobs", job_id_str, "cleaned", f"{page}.png")
 
     if not os.path.exists(raw_path):
         raise HTTPException(status_code=404, detail="Original page not found")
 
     restored = clean_page(raw_path)
     cv2.imwrite(cleaned_path, restored)
-    if _should_reparse_after_page_edit(job_id):
-        _reparse_single_page(job_id, page)
+    if _should_reparse_after_page_edit(job_id_str):
+        _reparse_single_page(job_id_str, page)
     return {"ok": True, "page": page}
 
 
@@ -1298,8 +1399,8 @@ def _backfill_job_account_identity(job_id: str, diagnostics: Dict, diagnostics_p
                     max_y = max(float(w.get("y2", 0.0)) for w in ocr_words) if ocr_words else 1.0
                     first_w = max(1.0, max_x)
                     first_h = max(1.0, max_y)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("OCR fallback account identity backfill failed for job %s", job_id, exc_info=exc)
 
     changed = False
     if identity.get("account_name") and (_identity_missing(job.get("account_name")) or identity.get("account_name") != job.get("account_name")):
@@ -1323,8 +1424,8 @@ def _backfill_job_account_identity(job_id: str, diagnostics: Dict, diagnostics_p
         try:
             with open(diagnostics_path, "w") as f:
                 json.dump(diagnostics, f, indent=2)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to persist diagnostics backfill for job %s", job_id, exc_info=exc)
     return diagnostics
 
 
