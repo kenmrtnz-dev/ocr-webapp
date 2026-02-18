@@ -14,6 +14,7 @@ pydantic==2.9.2
 pdf2image==1.17.0
 Pillow==10.4.0
 opencv-python-headless==4.10.0.84
+pypdf==5.2.0
 
 # OCR options (pick 1 to start; you can enable both later):
 pytesseract==0.3.13

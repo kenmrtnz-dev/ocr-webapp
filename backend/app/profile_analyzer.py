@@ -3,6 +3,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -300,6 +301,82 @@ def analyze_unknown_bank_and_apply(
     return response
 
 
+def analyze_unknown_bank_and_apply_guided(
+    layout_pages: List[Dict],
+    guided_payload: Dict,
+    sample_pages: int,
+    min_rows: int,
+    min_date_ratio: float,
+    min_balance_ratio: float,
+) -> Dict:
+    provider = str(os.getenv("AI_ANALYZER_PROVIDER", "gemini")).strip().lower() or "gemini"
+    model = str(os.getenv("AI_ANALYZER_MODEL", "")).strip() or _default_model(provider)
+    response = {
+        "triggered": True,
+        "result": "failed",
+        "reason": "analyzer_error",
+        "provider": provider,
+        "model": model,
+        "profile_name": None,
+    }
+
+    snippets = _build_snippets(layout_pages, sample_pages)
+    guided_rows = _build_guided_rows(guided_payload)
+    if not snippets and not guided_rows:
+        response["result"] = "skipped"
+        response["reason"] = "no_text_snippets"
+        return response
+
+    proposal, proposal_reason = _generate_profile_with_llm_guided(
+        snippets=snippets,
+        guided_rows=guided_rows,
+        provider=provider,
+        model=model,
+    )
+    if not proposal:
+        response["result"] = "failed"
+        response["reason"] = proposal_reason or "invalid_llm_output"
+        return response
+    if not _is_bank_like_profile(
+        str(proposal.get("profile_name") or ""),
+        _normalize_items(proposal.get("detection_contains_any", [])),
+        _normalize_items(proposal.get("detection_contains_all", [])),
+    ):
+        coerced_name = str(proposal.get("profile_name") or "").strip()
+        if not coerced_name:
+            coerced_name = "AUTO_GUIDED_BANK_LAYOUT"
+        elif "bank" not in coerced_name.lower():
+            coerced_name = f"{coerced_name}_BANK"
+        proposal["profile_name"] = coerced_name
+
+    candidate, rule, validation_reason = _validate_proposal(
+        proposal=proposal,
+        layout_pages=layout_pages,
+        sample_pages=sample_pages,
+        min_rows=min_rows,
+        min_date_ratio=min_date_ratio,
+        min_balance_ratio=min_balance_ratio,
+    )
+    if not candidate or not rule:
+        response["result"] = "rejected"
+        response["reason"] = (
+            f"validation_failed_{validation_reason}" if validation_reason else "validation_failed"
+        )
+        return response
+
+    response["profile_name"] = candidate.name
+    applied, apply_reason = _apply_profile_update_atomic(candidate, rule)
+    if not applied:
+        response["result"] = "failed"
+        response["reason"] = f"apply_failed_{apply_reason}" if apply_reason else "apply_failed"
+        return response
+
+    reload_profiles()
+    response["result"] = "applied"
+    response["reason"] = "profile_created"
+    return response
+
+
 def _build_snippets(layout_pages: List[Dict], sample_pages: int) -> List[Dict]:
     snippets: List[Dict] = []
     for idx, layout in enumerate(layout_pages, start=1):
@@ -330,6 +407,17 @@ def _generate_profile_with_llm(
 ) -> Tuple[Optional[Dict], Optional[str]]:
     if provider == "gemini":
         return _generate_profile_with_gemini(snippets, model)
+    return None, "unsupported_provider"
+
+
+def _generate_profile_with_llm_guided(
+    snippets: List[Dict],
+    guided_rows: List[Dict],
+    provider: str,
+    model: str,
+) -> Tuple[Optional[Dict], Optional[str]]:
+    if provider == "gemini":
+        return _generate_profile_with_gemini_guided(snippets, guided_rows, model)
     return None, "unsupported_provider"
 
 
@@ -368,31 +456,109 @@ def _generate_profile_with_gemini(
     return _call_gemini_json(payload, model)
 
 
+def _generate_profile_with_gemini_guided(
+    snippets: List[Dict],
+    guided_rows: List[Dict],
+    model: str,
+) -> Tuple[Optional[Dict], Optional[str]]:
+    prompt = (
+        "Generate a strict bank statement parsing profile using guided table OCR samples.\n"
+        "Return one JSON object only, no markdown.\n"
+        "Required keys:\n"
+        "profile_name, detection_contains_any, detection_contains_all, date_tokens, description_tokens, "
+        "debit_tokens, credit_tokens, balance_tokens, date_order, noise_tokens, "
+        "account_name_patterns, account_number_patterns.\n"
+        "Rules:\n"
+        "- date_order values must be from [mdy, dmy, ymd].\n"
+        "- all arrays contain strings only.\n"
+        "- detection_contains_any and detection_contains_all cannot both be empty.\n"
+        "- infer headers/tokens from guided OCR rows and snippets.\n"
+        "- do not invent bank/account names as profile names; profile_name must represent a bank layout.\n"
+        "Example shape:\n"
+        "{\"profile_name\":\"AUTO_EXAMPLE_BANK\",\"detection_contains_any\":[\"example bank\"],"
+        "\"detection_contains_all\":[],\"date_tokens\":[\"date\"],\"description_tokens\":[\"description\"],"
+        "\"debit_tokens\":[\"debit\"],\"credit_tokens\":[\"credit\"],\"balance_tokens\":[\"balance\"],"
+        "\"date_order\":[\"mdy\"],\"noise_tokens\":[],\"account_name_patterns\":[],\"account_number_patterns\":[]}\n"
+        f"Guided rows: {json.dumps(guided_rows, ensure_ascii=True)}\n"
+        f"Statement snippets: {json.dumps(snippets, ensure_ascii=True)}\n"
+        "Output JSON now."
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "application/json",
+        },
+    }
+    return _call_gemini_json(payload, model)
+
+
+def _build_guided_rows(guided_payload: Dict) -> List[Dict]:
+    rows = guided_payload.get("rows") if isinstance(guided_payload, dict) else None
+    if not isinstance(rows, list):
+        return []
+    out: List[Dict] = []
+    for row in rows[:60]:
+        if not isinstance(row, dict):
+            continue
+        out.append(
+            {
+                "date": str(row.get("date") or "")[:64],
+                "description": str(row.get("description") or "")[:180],
+                "debit": str(row.get("debit") or "")[:64],
+                "credit": str(row.get("credit") or "")[:64],
+                "balance": str(row.get("balance") or "")[:64],
+            }
+        )
+    return out
+
+
 def _call_gemini_json(payload: Dict, model: str) -> Tuple[Optional[Dict], Optional[str]]:
     api_key = str(os.getenv("GEMINI_API_KEY", "")).strip()
     if not api_key:
         return None, "missing_api_key"
     timeout = int(os.getenv("AI_ANALYZER_TIMEOUT_SEC", "20"))
 
-    body = json.dumps(payload).encode("utf-8")
-    encoded_model = urllib.parse.quote(model, safe="")
-    encoded_key = urllib.parse.quote(api_key, safe="")
-    req = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{encoded_model}:generateContent?key={encoded_key}",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    max_retries = max(0, int(os.getenv("AI_ANALYZER_RETRIES", "2")))
+    backoff_sec = max(0.1, float(os.getenv("AI_ANALYZER_RETRY_BACKOFF_SEC", "1.2")))
 
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as res:
-            raw = res.read().decode("utf-8", errors="ignore")
-    except urllib.error.HTTPError as exc:
-        return None, f"http_error_{exc.code}"
-    except TimeoutError:
-        return None, "timeout"
-    except (urllib.error.URLError, ValueError):
-        return None, "http_error_network"
+    raw = ""
+    last_reason = None
+    for attempt in range(max_retries + 1):
+        body = json.dumps(payload).encode("utf-8")
+        encoded_model = urllib.parse.quote(model, safe="")
+        encoded_key = urllib.parse.quote(api_key, safe="")
+        req = urllib.request.Request(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{encoded_model}:generateContent?key={encoded_key}",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as res:
+                raw = res.read().decode("utf-8", errors="ignore")
+            last_reason = None
+            break
+        except urllib.error.HTTPError as exc:
+            last_reason = f"http_error_{exc.code}"
+            if exc.code in {429, 500, 502, 503, 504} and attempt < max_retries:
+                time.sleep(backoff_sec * (2 ** attempt))
+                continue
+            return None, last_reason
+        except TimeoutError:
+            last_reason = "timeout"
+            if attempt < max_retries:
+                time.sleep(backoff_sec * (2 ** attempt))
+                continue
+            return None, last_reason
+        except (urllib.error.URLError, ValueError):
+            last_reason = "http_error_network"
+            if attempt < max_retries:
+                time.sleep(backoff_sec * (2 ** attempt))
+                continue
+            return None, last_reason
+    if last_reason and not raw:
+        return None, last_reason
 
     try:
         parsed = json.loads(raw)

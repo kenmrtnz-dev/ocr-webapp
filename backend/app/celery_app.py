@@ -2,6 +2,7 @@ import json
 import math
 import os
 import logging
+import uuid
 from typing import Dict, List
 
 import cv2
@@ -13,9 +14,16 @@ from app.bank_profiles import detect_bank_profile, extract_account_identity, fin
 from app.image_cleaner import clean_page
 from app.ocr_engine import ocr_image
 from app.pdf_text_extract import extract_pdf_layout_pages
-from app.profile_analyzer import analyze_account_identity_from_text, analyze_unknown_bank_and_apply
+from app.profile_analyzer import analyze_account_identity_from_text
 from app.statement_parser import parse_page_with_profile_fallback, is_transaction_row
-from app.workflow_service import sync_job_results, upsert_job_status
+from app.workflow_service import (
+    ensure_submission_pages,
+    get_submission_id_for_job,
+    set_page_parse_status,
+    sync_job_results,
+    sync_submission_page_result,
+    upsert_job_status,
+)
 
 
 DATA_DIR = os.getenv("DATA_DIR", "./data")
@@ -142,6 +150,7 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
     last_progress = 0
 
     status_meta: Dict[str, object] = {"parse_mode": parse_mode}
+    submission_id = get_submission_id_for_job(job_id)
 
     def report(status: str, step: str, progress: int, **extra):
         nonlocal last_progress
@@ -210,6 +219,11 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
                 page_files = [f"page_{i:03}.png" for i in range(1, max(total_pages, 0) + 1)]
             report("processing", "text_extraction", 45, pages=len(page_files), ocr_backend=OCR_BACKEND)
 
+        if submission_id and page_files:
+            ensure_submission_pages(submission_id, len(page_files), uuid.UUID(job_id))
+            for page_file in page_files:
+                set_page_parse_status(submission_id, page_file.replace(".png", ""), "processing")
+
         analyzer_meta = {
             "triggered": False,
             "result": "skipped",
@@ -219,26 +233,10 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
             "profile_name": None,
         }
         if AI_ANALYZER_ENABLED:
-            sample_profiles = _sample_detected_profiles(layout_pages, AI_ANALYZER_SAMPLE_PAGES)
-            if sample_profiles and all(name == "GENERIC" for name in sample_profiles):
-                report("processing", "profile_analyzer", 45, ocr_backend=OCR_BACKEND)
-                analyzer_meta = analyze_unknown_bank_and_apply(
-                    layout_pages=layout_pages,
-                    sample_pages=AI_ANALYZER_SAMPLE_PAGES,
-                    min_rows=AI_ANALYZER_MIN_ROWS,
-                    min_date_ratio=AI_ANALYZER_MIN_DATE_RATIO,
-                    min_balance_ratio=AI_ANALYZER_MIN_BAL_RATIO,
-                )
-            elif not sample_profiles:
-                analyzer_meta = {
-                    **analyzer_meta,
-                    "reason": "no_text_profiles_sampled",
-                }
-            else:
-                analyzer_meta = {
-                    **analyzer_meta,
-                    "reason": "matched_existing_profile",
-                }
+            analyzer_meta = {
+                **analyzer_meta,
+                "reason": "deferred_until_ocr_action",
+            }
         status_meta.update(
             {
                 "profile_analyzer_triggered": bool(analyzer_meta.get("triggered", False)),
@@ -354,8 +352,13 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
                         "fallback_reason": "image_read_failed",
                         "rows_parsed": 0,
                     }
-                    with open(os.path.join(ocr_dir, f"{page_name}.json"), "w") as f:
-                        json.dump([], f, indent=2)
+                    _write_json_atomic(os.path.join(ocr_dir, f"{page_name}.json"), [])
+                    _write_json_atomic(os.path.join(result_dir, "parsed_rows.json"), parsed_output)
+                    _write_json_atomic(os.path.join(result_dir, "bounds.json"), bounds_output)
+                    _write_json_atomic(os.path.join(result_dir, "parse_diagnostics.json"), diagnostics)
+                    if submission_id:
+                        sync_submission_page_result(job_id, page_name, [], diagnostics["pages"][page_name])
+                        set_page_parse_status(submission_id, page_name, "failed", "image_read_failed")
                     continue
                 page_h, page_w = img.shape[:2]
                 ocr_items = ocr_image(page_path, backend=OCR_BACKEND)
@@ -473,17 +476,20 @@ def process_pdf(job_id: str, parse_mode: str = "text"):
             diagnostics["job"]["account_identity_ai_result"] = account_identity_ai_result
             diagnostics["job"]["account_identity_ai_reason"] = account_identity_ai_reason
 
-            with open(os.path.join(ocr_dir, f"{page_name}.json"), "w") as f:
-                json.dump(ocr_items, f, indent=2)
+            _write_json_atomic(os.path.join(ocr_dir, f"{page_name}.json"), ocr_items)
+
+            _write_json_atomic(os.path.join(result_dir, "parsed_rows.json"), parsed_output)
+            _write_json_atomic(os.path.join(result_dir, "bounds.json"), bounds_output)
+            _write_json_atomic(os.path.join(result_dir, "parse_diagnostics.json"), diagnostics)
+            if submission_id:
+                sync_submission_page_result(job_id, page_name, filtered_rows, diagnostics["pages"][page_name])
+                set_page_parse_status(submission_id, page_name, "done")
 
         report("processing", "saving_results", 95, pages=len(page_files), ocr_backend=OCR_BACKEND)
 
-        with open(os.path.join(result_dir, "parsed_rows.json"), "w") as f:
-            json.dump(parsed_output, f, indent=2)
-        with open(os.path.join(result_dir, "bounds.json"), "w") as f:
-            json.dump(bounds_output, f, indent=2)
-        with open(os.path.join(result_dir, "parse_diagnostics.json"), "w") as f:
-            json.dump(diagnostics, f, indent=2)
+        _write_json_atomic(os.path.join(result_dir, "parsed_rows.json"), parsed_output)
+        _write_json_atomic(os.path.join(result_dir, "bounds.json"), bounds_output)
+        _write_json_atomic(os.path.join(result_dir, "parse_diagnostics.json"), diagnostics)
 
         try:
             sync_job_results(job_id, parsed_output, bounds_output, diagnostics)
@@ -523,6 +529,13 @@ def update_status(job_dir, status, **extra):
         upsert_job_status(job_id, data)
     except Exception as exc:
         logger.warning("[WORKER] upsert_job_status failed for %s: %s", job_dir, exc, exc_info=exc)
+
+
+def _write_json_atomic(path: str, payload):
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp, path)
 
 
 def _normalize_parse_mode(mode: str | None) -> str:

@@ -1,7 +1,7 @@
 import datetime as dt
 import uuid
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -83,6 +83,27 @@ class Transaction(Base):
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow, nullable=False)
 
 
+class SubmissionPage(Base):
+    __tablename__ = "submission_pages"
+    __table_args__ = (
+        UniqueConstraint("submission_id", "page_key", name="uq_submission_page_key"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    submission_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("submissions.id"), nullable=False, index=True)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("jobs.id"), nullable=True, index=True)
+    page_key: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    page_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    parse_status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending", index=True)
+    review_status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending", index=True)
+    rows_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    has_unsaved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    parse_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_parsed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_saved_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow, nullable=False)
+
+
 class Report(Base):
     __tablename__ = "reports"
 
@@ -105,4 +126,3 @@ class AuditLog(Base):
     before_json: Mapped[dict | None] = mapped_column(_json_col(), nullable=True)
     after_json: Mapped[dict | None] = mapped_column(_json_col(), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=dt.datetime.utcnow, nullable=False)
-

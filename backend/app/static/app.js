@@ -18,6 +18,7 @@ const analyzerProfile = document.getElementById('analyzerProfile');
 const analyzerReason = document.getElementById('analyzerReason');
 const downloadCSV = document.getElementById('downloadCSV');
 const exportExcelBtn = document.getElementById('exportExcelBtn');
+const finishReviewBtn = document.getElementById('finishReviewBtn');
 const viewDetails = document.getElementById('viewDetails');
 const finishSave = document.getElementById('finishSave');
 const tableBody = document.querySelector('.table-body');
@@ -31,17 +32,35 @@ const previewImage = document.getElementById('previewImage');
 const previewCanvas = document.getElementById('previewCanvas');
 const prevPageBtn = document.getElementById('prevPageBtn');
 const nextPageBtn = document.getElementById('nextPageBtn');
+const ocrToolsToggleBtn = document.getElementById('ocrToolsToggleBtn');
 const flattenModeBtn = document.getElementById('flattenModeBtn');
 const applyFlattenBtn = document.getElementById('applyFlattenBtn');
 const resetFlattenBtn = document.getElementById('resetFlattenBtn');
 const resetViewBtn = document.getElementById('resetViewBtn');
 const zoomOutBtn = document.getElementById('zoomOutBtn');
 const zoomInBtn = document.getElementById('zoomInBtn');
+const addHorizontalGuideBtn = document.getElementById('addHorizontalGuideBtn');
+const clearGuideLinesBtn = document.getElementById('clearGuideLinesBtn');
+const guideUndoBtn = document.getElementById('guideUndoBtn');
+const guideRedoBtn = document.getElementById('guideRedoBtn');
+const runSectionOcrBtn = document.getElementById('runSectionOcrBtn');
+const imageToolButtons = Array.from(document.querySelectorAll('.preview-image-tool-btn'));
+const guideSectionsInfo = document.getElementById('guideSectionsInfo');
+const sectionOcrResult = document.getElementById('sectionOcrResult');
+const previewColumnsRuler = document.getElementById('previewColumnsRuler');
+const previewRowsRuler = document.getElementById('previewRowsRuler');
 const pageIndicator = document.getElementById('pageIndicator');
 const pageSelect = document.getElementById('pageSelect');
 const previewWrap = document.querySelector('.preview-canvas-wrap');
+const previewPanel = document.querySelector('.preview-panel');
+const tablePanel = document.querySelector('.table-panel');
+const transactionsTable = document.querySelector('.transactions-table');
+const transactionsTableHeader = document.querySelector('.transactions-table .table-header');
 const zoomLevel = document.getElementById('zoomLevel');
 const resultsSection = document.querySelector('.results-section');
+const previewPageSavedMark = document.getElementById('previewPageSavedMark');
+const summaryLockedNote = document.getElementById('summaryLockedNote');
+const summaryCard = document.querySelector('.summary-card');
 const ocrToggle = document.getElementById('ocrToggle');
 const modeToggleText = document.getElementById('modeToggleText');
 const legacyMain = document.getElementById('legacyMain');
@@ -68,6 +87,7 @@ const agentRefreshBtn = document.getElementById('agentRefreshBtn');
 const agentSubmissionList = document.getElementById('agentSubmissionList');
 const evaluatorRefreshBtn = document.getElementById('evaluatorRefreshBtn');
 const evaluatorSearchInput = document.getElementById('evaluatorSearchInput');
+const evaluatorCombineBtn = document.getElementById('evaluatorCombineBtn');
 const evaluatorSubmissionList = document.getElementById('evaluatorSubmissionList');
 const evaluatorActionBar = document.getElementById('evaluatorActionBar');
 const evaluatorStartBtn = document.getElementById('evaluatorStartBtn');
@@ -118,6 +138,17 @@ let authToken = localStorage.getItem('auth_token') || '';
 let authRole = localStorage.getItem('auth_role') || '';
 let authUserEmail = localStorage.getItem('auth_email') || '';
 let evaluatorSelectedSubmission = null;
+let evaluatorManifest = [];
+let evaluatorReviewProgress = { total_pages: 0, parsed_pages: 0, reviewed_pages: 0, percent: 0 };
+let evaluatorCanExport = false;
+let activePageKey = '';
+let activePageReviewStatus = 'pending';
+let activePageUpdatedAt = null;
+let activePageDirty = false;
+let activePageSaveInFlight = false;
+let activePageSavePromise = null;
+let activePageAutosaveTimer = null;
+let evaluatorManifestTimer = null;
 let isAgentSubmitting = false;
 let agentSubmissionsCache = [];
 let agentSubmissionsPage = 1;
@@ -125,6 +156,115 @@ const AGENT_SUBMISSIONS_PAGE_SIZE = 15;
 let evaluatorSubmissionsCache = [];
 let evaluatorSubmissionsPage = 1;
 const EVALUATOR_SUBMISSIONS_PAGE_SIZE = 15;
+let evaluatorSelectedSubmissionIds = new Set();
+let evaluatorCombineInFlight = false;
+let authRedirectInProgress = false;
+let statusStallSignature = '';
+let statusStallCount = 0;
+let progressWatchSignature = '';
+let progressWatchUpdatedAt = 0;
+let progressWatchStatus = 'queued';
+let progressWatchHandled = false;
+const GUIDE_LINE_DUP_TOLERANCE = 0.006;
+const GUIDE_HISTORY_LIMIT = 100;
+const ACTIVE_PAGE_AUTOSAVE_DEBOUNCE_MS = 700;
+const COLUMN_LAYOUT_MIN_WIDTH = 0.08;
+const HORIZONTAL_LINE_MIN_GAP = 0.01;
+const MAX_AUTO_HORIZONTAL_GUIDES = 40;
+const DEFAULT_COLUMN_LAYOUT = [
+  { key: 'date', label: 'Date', width: 0.16 },
+  { key: 'description', label: 'Description', width: 0.34 },
+  { key: 'debit', label: 'Debit', width: 0.16 },
+  { key: 'credit', label: 'Credit', width: 0.16 },
+  { key: 'balance', label: 'Balance', width: 0.18 },
+];
+let guideLinesByPage = {};
+let guideHistoryByPage = {};
+let columnLayoutByPage = {};
+let columnDragState = { sourceKey: '', targetKey: '' };
+let columnResizeState = null;
+let columnSwapSelectKey = '';
+let horizontalGuideDragState = null;
+let horizontalGuideTouchedByPage = {};
+let activeGuideTool = 'none';
+let sectionOcrResultsByPage = {};
+let sectionOcrInFlight = false;
+let sectionOcrProgressTimer = null;
+let sectionOcrProgressValue = 0;
+let imageToolInFlight = false;
+let activeParseMode = 'text';
+let ocrToolsUnlocked = false;
+let toastContainer = null;
+
+function ensureToastContainer() {
+  if (toastContainer && document.body.contains(toastContainer)) return toastContainer;
+  toastContainer = document.getElementById('appToastContainer');
+  if (!toastContainer) {
+    toastContainer = document.createElement('div');
+    toastContainer.id = 'appToastContainer';
+    toastContainer.className = 'app-toast-container';
+    document.body.appendChild(toastContainer);
+  }
+  return toastContainer;
+}
+
+function inferToastType(message) {
+  const text = String(message || '').toLowerCase();
+  if (!text) return 'info';
+  if (text.includes('failed') || text.includes('error') || text.includes('forbidden') || text.includes('timeout')) {
+    return 'error';
+  }
+  if (text.includes('warning') || text.includes('stalled') || text.includes('select') || text.includes('blocked')) {
+    return 'warning';
+  }
+  if (text.includes('done') || text.includes('saved') || text.includes('completed') || text.includes('enabled') || text.includes('submitted')) {
+    return 'success';
+  }
+  return 'info';
+}
+
+function showToast(message, type = 'info', durationMs = 3200) {
+  const container = ensureToastContainer();
+  const toast = document.createElement('div');
+  toast.className = `app-toast app-toast-${type}`;
+  toast.setAttribute('role', 'status');
+
+  const textEl = document.createElement('div');
+  textEl.className = 'app-toast-text';
+  textEl.textContent = String(message || '');
+  toast.appendChild(textEl);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'app-toast-close';
+  closeBtn.type = 'button';
+  closeBtn.setAttribute('aria-label', 'Dismiss notification');
+  closeBtn.textContent = '×';
+  closeBtn.addEventListener('click', () => {
+    toast.classList.add('closing');
+    setTimeout(() => toast.remove(), 140);
+  });
+  toast.appendChild(closeBtn);
+
+  container.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('show'));
+
+  if (durationMs > 0) {
+    setTimeout(() => {
+      if (!toast.isConnected) return;
+      toast.classList.add('closing');
+      setTimeout(() => toast.remove(), 140);
+    }, durationMs);
+  }
+}
+
+if (typeof window !== 'undefined') {
+  const nativeAlert = window.alert ? window.alert.bind(window) : null;
+  window.__nativeAlert = nativeAlert;
+  window.showToast = showToast;
+  window.alert = (message) => {
+    showToast(message, inferToastType(message));
+  };
+}
 
 if ((forcedPageRole === 'agent' || forcedPageRole === 'credit_evaluator') && (!authToken || !authRole)) {
   window.location.href = '/login';
@@ -152,6 +292,46 @@ function getSelectedParseMode() {
   return ocrToggle && ocrToggle.checked ? 'ocr' : 'text';
 }
 
+function normalizeParseMode(mode) {
+  return String(mode || '').trim().toLowerCase() === 'ocr' ? 'ocr' : 'text';
+}
+
+function canUseOcrTools() {
+  return activeParseMode === 'ocr' || ocrToolsUnlocked;
+}
+
+function isTextOnlyToolsMode() {
+  return Boolean(authRole === 'credit_evaluator' && evaluatorSelectedSubmission) && !canUseOcrTools();
+}
+
+function renderOcrToolsToggle() {
+  if (!ocrToolsToggleBtn) return;
+  const unlocked = canUseOcrTools();
+  ocrToolsToggleBtn.textContent = unlocked ? 'OCR' : 'TEXT';
+  ocrToolsToggleBtn.classList.toggle('is-active', unlocked);
+  ocrToolsToggleBtn.setAttribute('aria-label', unlocked ? 'OCR tools enabled' : 'OCR tools disabled');
+  ocrToolsToggleBtn.title = unlocked ? 'OCR tools enabled' : 'OCR tools disabled';
+}
+
+function setActiveParseMode(mode) {
+  const nextMode = normalizeParseMode(mode || activeParseMode);
+  if (nextMode !== activeParseMode) {
+    // Default lock when parser mode is text; default unlock when parser mode is OCR.
+    ocrToolsUnlocked = nextMode === 'ocr';
+  }
+  activeParseMode = nextMode;
+  if (isTextOnlyToolsMode()) {
+    activeGuideTool = 'none';
+    if (flattenMode) {
+      flattenMode = false;
+      flattenPoints = [];
+    }
+  }
+  renderOcrToolsToggle();
+  updateFlattenButtons();
+  updateGuideToolButtons();
+}
+
 function syncModeToggleText() {
   if (!modeToggleText) return;
   modeToggleText.textContent = getSelectedParseMode().toUpperCase();
@@ -172,16 +352,117 @@ if (ocrToggle) {
 }
 
 syncModeToggleText();
+updateGuideToolButtons();
 
 function setLegacyEditorVisible(visible) {
   if (!legacyMain) return;
   legacyMain.style.display = visible ? '' : 'none';
 }
 
+function setPreviewAspectRatioFromImage() {
+  if (!previewImage || !previewImage.naturalWidth || !previewImage.naturalHeight) return;
+  const w = Math.max(1, Number(previewImage.naturalWidth));
+  const h = Math.max(1, Number(previewImage.naturalHeight));
+  const ratio = `${w} / ${h}`;
+  if (previewPanel) {
+    previewPanel.style.setProperty('--preview-aspect-ratio', ratio);
+  }
+  if (previewWrap) {
+    previewWrap.style.setProperty('aspect-ratio', ratio);
+    const wrapWidth = previewWrap.clientWidth || previewWrap.getBoundingClientRect().width || 0;
+    if (wrapWidth > 0) {
+      const nextHeight = Math.max(120, Math.round((wrapWidth * h) / w));
+      previewWrap.style.height = `${nextHeight}px`;
+    }
+  }
+  requestAnimationFrame(syncTablePanelHeightToPreview);
+}
+
+function clearPreviewAspectRatio() {
+  if (!previewPanel) return;
+  previewPanel.style.removeProperty('--preview-aspect-ratio');
+  if (previewWrap) {
+    previewWrap.style.removeProperty('aspect-ratio');
+    previewWrap.style.removeProperty('height');
+  }
+  clearTablePanelHeightClamp();
+}
+
+function clearTablePanelHeightClamp() {
+  if (tablePanel) {
+    tablePanel.style.removeProperty('height');
+    tablePanel.style.removeProperty('max-height');
+  }
+  if (transactionsTable) {
+    transactionsTable.style.removeProperty('height');
+    transactionsTable.style.removeProperty('max-height');
+  }
+  if (tableBody) {
+    tableBody.style.removeProperty('height');
+    tableBody.style.removeProperty('max-height');
+    tableBody.style.removeProperty('overflow-y');
+  }
+}
+
+function syncTablePanelHeightToPreview() {
+  if (!tablePanel || !transactionsTable || !tableBody || !previewPanel || !previewImage || !previewImage.naturalWidth) {
+    clearTablePanelHeightClamp();
+    return;
+  }
+
+  const previewHeight = Math.round(previewPanel.getBoundingClientRect().height || 0);
+  if (!Number.isFinite(previewHeight) || previewHeight <= 0) {
+    clearTablePanelHeightClamp();
+    return;
+  }
+
+  tablePanel.style.height = `${previewHeight}px`;
+  tablePanel.style.maxHeight = `${previewHeight}px`;
+  transactionsTable.style.height = `${previewHeight}px`;
+  transactionsTable.style.maxHeight = `${previewHeight}px`;
+
+  const headerHeight = Math.round(
+    (transactionsTableHeader && transactionsTableHeader.getBoundingClientRect().height) || 0
+  );
+  const bodyHeight = Math.max(80, previewHeight - headerHeight - 2);
+  tableBody.style.height = `${bodyHeight}px`;
+  tableBody.style.maxHeight = `${bodyHeight}px`;
+  tableBody.style.overflowY = 'auto';
+}
+
 async function fetchAuthed(url, opts = {}) {
   const headers = new Headers(opts.headers || {});
   if (authToken) headers.set('Authorization', `Bearer ${authToken}`);
-  return fetch(url, { ...opts, headers });
+  const res = await fetch(url, { ...opts, headers });
+  if (res.status === 401) {
+    const body = await safeParseJson(res.clone());
+    const detail = String((body && body.detail) || '').trim().toLowerCase();
+    const isExpired =
+      detail === 'token_expired' ||
+      detail === 'invalid_token' ||
+      detail === 'invalid_token_signature' ||
+      detail === 'missing_auth_token';
+    if (isExpired) {
+      handleAuthExpired();
+    }
+  }
+  return res;
+}
+
+function handleAuthExpired() {
+  if (authRedirectInProgress) return;
+  authRedirectInProgress = true;
+  clearActivePageAutosaveTimer();
+  if (sectionOcrProgressTimer) {
+    clearInterval(sectionOcrProgressTimer);
+    sectionOcrProgressTimer = null;
+  }
+  evaluatorSelectedSubmission = null;
+  clearEvaluatorManifestTimer();
+  clearPreviewBlobCache();
+  setAuthState('', '', '');
+  setLegacyEditorVisible(false);
+  window.location.href = '/login';
 }
 
 function setAuthState(token, role, email) {
@@ -225,6 +506,1297 @@ function updateWorkflowVisibility() {
   setLegacyEditorVisible(showAgentMain || showEvaluatorMain || showUnifiedMain);
 }
 
+function clearEvaluatorManifestTimer() {
+  if (evaluatorManifestTimer) {
+    clearInterval(evaluatorManifestTimer);
+    evaluatorManifestTimer = null;
+  }
+}
+
+function resetStatusStallTracker() {
+  statusStallSignature = '';
+  statusStallCount = 0;
+  progressWatchSignature = '';
+  progressWatchUpdatedAt = Date.now();
+  progressWatchStatus = 'queued';
+  progressWatchHandled = false;
+}
+
+function isStatusStalled(statusBody) {
+  const state = String(statusBody && statusBody.status ? statusBody.status : '').toLowerCase();
+  const mode = String(statusBody && statusBody.parse_mode ? statusBody.parse_mode : '').toLowerCase();
+  if (state !== 'processing' || mode !== 'text') {
+    resetStatusStallTracker();
+    return false;
+  }
+  const sig = [
+    state,
+    String(statusBody.step || ''),
+    String(statusBody.progress ?? ''),
+    String(statusBody.page || ''),
+  ].join('|');
+  if (sig === statusStallSignature) {
+    statusStallCount += 1;
+  } else {
+    statusStallSignature = sig;
+    statusStallCount = 0;
+  }
+  return statusStallCount >= 25;
+}
+
+function checkProgressWatchdog() {
+  if (progressWatchHandled) return;
+  const state = String(progressWatchStatus || '').toLowerCase();
+  if (state !== 'processing' && state !== 'queued') return;
+  if (!progressWatchUpdatedAt) return;
+  if ((Date.now() - progressWatchUpdatedAt) < 45000) return;
+  progressWatchHandled = true;
+  updateProgressUI(
+    100,
+    'Processing appears stalled',
+    'failed',
+    null,
+    activeParseMode,
+    { status: 'failed', message: 'processing_stale_timeout' }
+  );
+  stopElapsedTimer();
+  clearEvaluatorManifestTimer();
+}
+
+function areAllManifestPagesParsed() {
+  const total = Number(evaluatorReviewProgress && evaluatorReviewProgress.total_pages ? evaluatorReviewProgress.total_pages : evaluatorManifest.length);
+  const parsed = Number(evaluatorReviewProgress && evaluatorReviewProgress.parsed_pages ? evaluatorReviewProgress.parsed_pages : 0);
+  return total > 0 && parsed >= total;
+}
+
+function setSummaryLocked(locked) {
+  if (summaryCard) summaryCard.classList.toggle('is-locked', locked);
+  if (summaryLockedNote) summaryLockedNote.style.display = locked ? '' : 'none';
+  if (downloadCSV) downloadCSV.disabled = !!locked;
+  if (exportExcelBtn) exportExcelBtn.disabled = !!locked;
+  if (finishReviewBtn) finishReviewBtn.disabled = !locked;
+}
+
+function clearActivePageAutosaveTimer() {
+  if (activePageAutosaveTimer) {
+    clearTimeout(activePageAutosaveTimer);
+    activePageAutosaveTimer = null;
+  }
+}
+
+function scheduleActivePageAutosave() {
+  if (!(authRole === 'credit_evaluator' && evaluatorSelectedSubmission && activePageKey)) return;
+  clearActivePageAutosaveTimer();
+  activePageAutosaveTimer = setTimeout(async () => {
+    activePageAutosaveTimer = null;
+    if (!activePageDirty || !activePageKey) return;
+    await saveActivePageIfDirty({ silent: true });
+  }, ACTIVE_PAGE_AUTOSAVE_DEBOUNCE_MS);
+}
+
+function markActivePageDirty() {
+  if (authRole === 'credit_evaluator' && evaluatorSelectedSubmission) {
+    activePageDirty = true;
+    renderActivePageSavedMark();
+    scheduleActivePageAutosave();
+  }
+}
+
+function renderActivePageSavedMark() {
+  if (!previewPageSavedMark) return;
+  const currentKey = activePageKey || currentPageKey();
+  const manifestPage = evaluatorManifest.find((p) => String(p.page_key || '') === String(currentKey || ''));
+  const reviewStatus = String(
+    (manifestPage && manifestPage.review_status) || activePageReviewStatus || ''
+  ).toLowerCase();
+  const reviewSaved = reviewStatus === 'saved' || reviewStatus === 'reviewed';
+  const isSaved = reviewSaved && !activePageDirty;
+  const label = isSaved ? 'Saved' : 'Not saved';
+  previewPageSavedMark.classList.toggle('is-saved', isSaved);
+  previewPageSavedMark.classList.toggle('is-unsaved', !isSaved);
+  previewPageSavedMark.setAttribute('title', label);
+  previewPageSavedMark.setAttribute('aria-label', label);
+}
+
+function normalizeGuidePosition(value) {
+  return clamp(Number(value), 0, 1);
+}
+
+function dedupeSortedGuidePositions(values) {
+  const sorted = [...values].map(normalizeGuidePosition).sort((a, b) => a - b);
+  const out = [];
+  sorted.forEach((v) => {
+    if (!out.length || Math.abs(v - out[out.length - 1]) > GUIDE_LINE_DUP_TOLERANCE) {
+      out.push(v);
+    }
+  });
+  return out;
+}
+
+function getGuideStateForPage(pageKey, create = false) {
+  if (!pageKey) return { vertical: [], horizontal: [] };
+  const key = String(pageKey);
+  if (!guideLinesByPage[key] && create) {
+    guideLinesByPage[key] = { vertical: [], horizontal: [] };
+  }
+  return guideLinesByPage[key] || { vertical: [], horizontal: [] };
+}
+
+function cloneDefaultColumnLayout() {
+  return DEFAULT_COLUMN_LAYOUT.map((col) => ({ ...col }));
+}
+
+function normalizeColumnLayout(layout) {
+  const defaults = cloneDefaultColumnLayout();
+  const defaultByKey = new Map(defaults.map((col) => [col.key, col]));
+  const normalized = [];
+  const seen = new Set();
+
+  (Array.isArray(layout) ? layout : []).forEach((item) => {
+    const key = String(item && item.key ? item.key : '').trim();
+    if (!defaultByKey.has(key) || seen.has(key)) return;
+    seen.add(key);
+    const fallback = defaultByKey.get(key);
+    const widthRaw = Number(item && item.width);
+    normalized.push({
+      key,
+      label: fallback.label,
+      width: Number.isFinite(widthRaw) ? widthRaw : fallback.width,
+    });
+  });
+
+  defaults.forEach((col) => {
+    if (seen.has(col.key)) return;
+    normalized.push({ ...col });
+  });
+
+  const clamped = normalized.map((col) => ({
+    ...col,
+    width: Math.max(COLUMN_LAYOUT_MIN_WIDTH, Number(col.width || 0)),
+  }));
+  const total = clamped.reduce((sum, col) => sum + col.width, 0) || 1;
+  return clamped.map((col) => ({ ...col, width: col.width / total }));
+}
+
+function computeVerticalLinesFromColumnLayout(layout) {
+  const lines = [];
+  let cursor = 0;
+  for (let i = 0; i < layout.length - 1; i += 1) {
+    cursor += Number(layout[i].width || 0);
+    lines.push(cursor);
+  }
+  return dedupeSortedGuidePositions(lines);
+}
+
+function getColumnLayoutForPage(pageKey, create = false) {
+  if (!pageKey) return cloneDefaultColumnLayout();
+  const key = String(pageKey);
+  if (!columnLayoutByPage[key] && create) {
+    columnLayoutByPage[key] = normalizeColumnLayout(cloneDefaultColumnLayout());
+  }
+  const current = columnLayoutByPage[key] || cloneDefaultColumnLayout();
+  return normalizeColumnLayout(current);
+}
+
+function setColumnLayoutForPage(pageKey, layout) {
+  if (!pageKey) return;
+  const key = String(pageKey);
+  columnLayoutByPage[key] = normalizeColumnLayout(layout);
+}
+
+function buildGuideStatePayload(pageKey) {
+  if (!pageKey) {
+    return { column_layout: [], horizontal: [] };
+  }
+  const layout = normalizeColumnLayout(getColumnLayoutForPage(pageKey, true));
+  const state = getGuideStateForPage(pageKey, true);
+  return {
+    column_layout: layout.map((col) => ({
+      key: col.key,
+      width: Number(Number(col.width || 0).toFixed(6)),
+    })),
+    horizontal: sanitizeHorizontalGuideLines(state.horizontal || []).map((value) => Number(value.toFixed(6))),
+  };
+}
+
+function applyGuideStatePayload(pageKey, payload) {
+  if (!pageKey || !payload || typeof payload !== 'object') return;
+  const state = getGuideStateForPage(pageKey, true);
+  const incomingLayout = Array.isArray(payload.column_layout)
+    ? payload.column_layout.map((item) => ({
+      key: item && item.key ? String(item.key) : '',
+      width: Number(item && item.width),
+    }))
+    : [];
+  if (incomingLayout.length) {
+    setColumnLayoutForPage(pageKey, incomingLayout);
+    state.vertical = computeVerticalLinesFromColumnLayout(getColumnLayoutForPage(pageKey, true));
+  } else {
+    ensureColumnLayoutForPage(pageKey);
+  }
+  const hasHorizontal = Array.isArray(payload.horizontal);
+  state.horizontal = sanitizeHorizontalGuideLines(hasHorizontal ? payload.horizontal : []);
+  if (hasHorizontal) {
+    markHorizontalGuideTouched(pageKey);
+  }
+}
+
+function syncColumnLayoutFromGuideState(pageKey) {
+  if (!pageKey) return;
+  const state = getGuideStateForPage(pageKey, false);
+  const lines = dedupeSortedGuidePositions((state && state.vertical) || []);
+  const current = getColumnLayoutForPage(pageKey, true);
+  if (lines.length !== current.length - 1) return;
+
+  const bounds = [0, ...lines, 1];
+  const adjusted = current.map((col, idx) => ({
+    ...col,
+    width: Math.max(COLUMN_LAYOUT_MIN_WIDTH, bounds[idx + 1] - bounds[idx]),
+  }));
+  setColumnLayoutForPage(pageKey, adjusted);
+}
+
+function applyColumnLayoutToGuides(pageKey, options = {}) {
+  if (!pageKey) return false;
+  const opts = {
+    recordHistory: false,
+    invalidate: true,
+    redraw: true,
+    ...options,
+  };
+  const state = getGuideStateForPage(pageKey, true);
+  const before = cloneGuideStateSnapshot(state);
+  const layout = getColumnLayoutForPage(pageKey, true);
+  const next = {
+    vertical: computeVerticalLinesFromColumnLayout(layout),
+    horizontal: (state.horizontal || []).slice(),
+  };
+  if (guideStatesEqual(before, next)) {
+    if (opts.redraw) drawBoundingBoxes();
+    return false;
+  }
+  if (opts.recordHistory) {
+    pushGuideUndoSnapshot(pageKey, before);
+  }
+  applyGuideStateSnapshot(pageKey, next);
+  if (opts.invalidate) {
+    invalidateGuideDerivedData(pageKey);
+  }
+  updateGuideSectionsInfo();
+  updateGuideToolButtons();
+  if (opts.redraw) drawBoundingBoxes();
+  return true;
+}
+
+function ensureColumnLayoutForPage(pageKey) {
+  if (isTextOnlyToolsMode()) return;
+  if (!pageKey) return;
+  const key = String(pageKey);
+  if (!columnLayoutByPage[key]) {
+    setColumnLayoutForPage(key, cloneDefaultColumnLayout());
+    applyColumnLayoutToGuides(key, { recordHistory: false, invalidate: false, redraw: false });
+    return;
+  }
+  applyColumnLayoutToGuides(key, { recordHistory: false, invalidate: false, redraw: false });
+}
+
+function getColumnRolesForPage(pageKey) {
+  const layout = getColumnLayoutForPage(pageKey, true);
+  return layout.map((col) => col.key);
+}
+
+function renderPreviewColumnsRuler() {
+  if (!previewColumnsRuler) return;
+  if (isTextOnlyToolsMode()) {
+    previewColumnsRuler.innerHTML = '';
+    previewColumnsRuler.classList.add('is-hidden');
+    resetPreviewColumnsRulerGeometry();
+    return;
+  }
+  const pageKey = currentPageKey();
+  if (!pageKey) {
+    previewColumnsRuler.innerHTML = '';
+    previewColumnsRuler.classList.add('is-hidden');
+    resetPreviewColumnsRulerGeometry();
+    return;
+  }
+
+  const layout = getColumnLayoutForPage(pageKey, true);
+  if (columnSwapSelectKey && !layout.some((col) => col.key === columnSwapSelectKey)) {
+    columnSwapSelectKey = '';
+  }
+  previewColumnsRuler.classList.remove('is-hidden');
+  previewColumnsRuler.classList.toggle('is-resizing', Boolean(columnResizeState));
+  previewColumnsRuler.innerHTML = '';
+  const track = document.createElement('div');
+  track.className = 'preview-columns-track';
+  const boundaries = [0];
+  let cursor = 0;
+  layout.forEach((col, idx) => {
+    cursor += Number(col.width || 0);
+    boundaries.push(idx === layout.length - 1 ? 1 : cursor);
+  });
+  if (boundaries.length !== layout.length + 1) {
+    boundaries.length = 0;
+    boundaries.push(0);
+    for (let i = 0; i < layout.length; i += 1) {
+      boundaries.push((i + 1) / layout.length);
+    }
+  }
+
+  layout.forEach((col, idx) => {
+    const start = clamp(boundaries[idx], 0, 1);
+    const end = clamp(boundaries[idx + 1], 0, 1);
+    const width = Math.max(0, end - start);
+    const item = document.createElement('div');
+    item.className = 'preview-col-item';
+    item.draggable = true;
+    item.dataset.colKey = col.key;
+    item.style.left = `${(start * 100).toFixed(6)}%`;
+    item.style.width = `${(width * 100).toFixed(6)}%`;
+    if (columnDragState.sourceKey && columnDragState.sourceKey === col.key) {
+      item.classList.add('is-drag-source');
+    }
+    if (columnDragState.targetKey && columnDragState.targetKey === col.key) {
+      item.classList.add('is-drop-target');
+    }
+    if (columnSwapSelectKey && columnSwapSelectKey === col.key) {
+      item.classList.add('is-selected');
+    }
+
+    const label = document.createElement('span');
+    label.className = 'preview-col-label';
+    label.textContent = col.label;
+    item.appendChild(label);
+
+    if (idx < layout.length - 1) {
+      const resizer = document.createElement('button');
+      resizer.type = 'button';
+      resizer.className = 'preview-col-resizer';
+      resizer.dataset.resizeIndex = String(idx);
+      resizer.setAttribute('aria-label', `Resize ${col.label} column`);
+      resizer.title = `Resize ${col.label}`;
+      item.appendChild(resizer);
+    }
+    track.appendChild(item);
+  });
+
+  for (let i = 1; i < boundaries.length - 1; i += 1) {
+    const divider = document.createElement('span');
+    divider.className = 'preview-col-divider';
+    divider.style.left = `${(clamp(boundaries[i], 0, 1) * 100).toFixed(6)}%`;
+    track.appendChild(divider);
+  }
+  previewColumnsRuler.appendChild(track);
+  syncPreviewColumnsRulerGeometryFromCurrentView();
+}
+
+function updateRulerDragClasses() {
+  if (!previewColumnsRuler) return;
+  const items = previewColumnsRuler.querySelectorAll('.preview-col-item');
+  items.forEach((item) => {
+    const key = String(item.dataset && item.dataset.colKey ? item.dataset.colKey : '');
+    item.classList.toggle('is-drag-source', Boolean(columnDragState.sourceKey && columnDragState.sourceKey === key));
+    item.classList.toggle('is-drop-target', Boolean(columnDragState.targetKey && columnDragState.targetKey === key));
+    item.classList.toggle('is-selected', Boolean(columnSwapSelectKey && columnSwapSelectKey === key));
+  });
+}
+
+function resetPreviewColumnsRulerGeometry() {
+  if (!previewColumnsRuler) return;
+  previewColumnsRuler.style.paddingLeft = '';
+  previewColumnsRuler.style.paddingRight = '';
+  const track = previewColumnsRuler.querySelector('.preview-columns-track');
+  if (track) {
+    track.style.left = '0px';
+    track.style.width = '100%';
+  }
+}
+
+function syncPreviewColumnsRulerGeometry(canvasLeft, drawW) {
+  if (!previewColumnsRuler || !previewWrap) return;
+  previewColumnsRuler.style.paddingLeft = '';
+  previewColumnsRuler.style.paddingRight = '';
+  const track = previewColumnsRuler.querySelector('.preview-columns-track');
+  if (!track) return;
+  const rulerRect = previewColumnsRuler.getBoundingClientRect();
+  const wrapRect = previewWrap.getBoundingClientRect();
+  if (!rulerRect.width || !wrapRect.width || !Number.isFinite(drawW) || drawW <= 0) {
+    resetPreviewColumnsRulerGeometry();
+    return;
+  }
+
+  const rulerStyles = window.getComputedStyle(previewColumnsRuler);
+  const rulerBorderLeft = Number.parseFloat(rulerStyles.borderLeftWidth || '0') || 0;
+  const rulerBorderRight = Number.parseFloat(rulerStyles.borderRightWidth || '0') || 0;
+
+  const wrapOffsetX = wrapRect.left - rulerRect.left;
+  const targetLeft = wrapOffsetX + (Number.isFinite(canvasLeft) ? canvasLeft : 0);
+  const trackLeft = targetLeft - rulerBorderLeft;
+  track.style.left = `${trackLeft.toFixed(3)}px`;
+  track.style.width = `${Number(drawW).toFixed(3)}px`;
+}
+
+function getPreviewColumnsRulerActiveWidth() {
+  if (!previewColumnsRuler) return 0;
+  const track = previewColumnsRuler.querySelector('.preview-columns-track');
+  if (track) {
+    const rect = track.getBoundingClientRect();
+    if (rect.width) return Math.max(1, rect.width);
+  }
+  return Math.max(1, previewColumnsRuler.clientWidth || 1);
+}
+
+function syncPreviewColumnsRulerGeometryFromCurrentView() {
+  if (!previewColumnsRuler || !previewWrap || !previewImage || !previewImage.naturalWidth) {
+    resetPreviewColumnsRulerGeometry();
+    return;
+  }
+  const wrapRect = previewWrap.getBoundingClientRect();
+  const rect = getRenderedImageRect(previewImage);
+  const baseLeft = rect.left - wrapRect.left;
+  const drawW = Math.max(1, Math.round(rect.width * previewZoom));
+  const centerX = baseLeft + (rect.width / 2) + previewPanX;
+  const canvasLeft = Math.round(centerX - (drawW / 2));
+  syncPreviewColumnsRulerGeometry(canvasLeft, drawW);
+}
+
+function markHorizontalGuideTouched(pageKey) {
+  if (!pageKey) return;
+  horizontalGuideTouchedByPage[String(pageKey)] = true;
+}
+
+function sanitizeHorizontalGuideLines(values) {
+  const filtered = dedupeSortedGuidePositions((values || []).map(normalizeGuidePosition))
+    .filter((v) => v > HORIZONTAL_LINE_MIN_GAP && v < 1 - HORIZONTAL_LINE_MIN_GAP);
+  const out = [];
+  filtered.forEach((v) => {
+    if (!out.length || v - out[out.length - 1] >= HORIZONTAL_LINE_MIN_GAP) {
+      out.push(v);
+    }
+  });
+  if (out.length <= MAX_AUTO_HORIZONTAL_GUIDES) return out;
+  const reduced = [];
+  const stride = out.length / MAX_AUTO_HORIZONTAL_GUIDES;
+  for (let i = 0; i < MAX_AUTO_HORIZONTAL_GUIDES; i += 1) {
+    reduced.push(out[Math.floor(i * stride)]);
+  }
+  return dedupeSortedGuidePositions(reduced);
+}
+
+function inferAutoHorizontalGuidesForPage(pageKey) {
+  const bounds = Array.isArray(boundsByPage[pageKey]) ? boundsByPage[pageKey] : [];
+  const rows = bounds
+    .map((b) => ({
+      y1: clamp(Number(b && b.y1), 0, 1),
+      y2: clamp(Number(b && b.y2), 0, 1),
+    }))
+    .filter((r) => Number.isFinite(r.y1) && Number.isFinite(r.y2) && r.y2 > r.y1)
+    .sort((a, b) => ((a.y1 + a.y2) / 2) - ((b.y1 + b.y2) / 2));
+
+  if (rows.length < 2) return [];
+  const lines = [];
+  for (let i = 0; i < rows.length - 1; i += 1) {
+    const current = rows[i];
+    const next = rows[i + 1];
+    const currMid = (current.y1 + current.y2) / 2;
+    const nextMid = (next.y1 + next.y2) / 2;
+    const split = next.y1 > current.y2
+      ? (current.y2 + next.y1) / 2
+      : (currMid + nextMid) / 2;
+    if (Number.isFinite(split)) {
+      lines.push(split);
+    }
+  }
+  return sanitizeHorizontalGuideLines(lines);
+}
+
+function maybeAutoSeedHorizontalGuides(pageKey, options = {}) {
+  if (isTextOnlyToolsMode()) return false;
+  if (!pageKey) return false;
+  const key = String(pageKey);
+  if (horizontalGuideTouchedByPage[key]) return false;
+
+  const state = getGuideStateForPage(key, true);
+  if ((state.horizontal || []).length) return false;
+
+  const suggested = inferAutoHorizontalGuidesForPage(key);
+  if (!suggested.length) return false;
+
+  state.horizontal = suggested.slice();
+  const opts = { redraw: false, invalidate: false, ...options };
+  if (opts.invalidate) {
+    invalidateGuideDerivedData(key);
+  }
+  updateGuideSectionsInfo();
+  updateGuideToolButtons();
+  if (opts.redraw) {
+    drawBoundingBoxes();
+  }
+  return true;
+}
+
+function renderPreviewRowsRuler() {
+  if (!previewRowsRuler) return;
+  if (isTextOnlyToolsMode()) {
+    previewRowsRuler.innerHTML = '';
+    previewRowsRuler.classList.add('is-hidden');
+    return;
+  }
+  const pageKey = currentPageKey();
+  if (!pageKey) {
+    previewRowsRuler.innerHTML = '';
+    previewRowsRuler.classList.add('is-hidden');
+    return;
+  }
+
+  previewRowsRuler.classList.remove('is-hidden');
+  previewRowsRuler.classList.toggle('is-resizing', Boolean(horizontalGuideDragState));
+  const state = getGuideStateForPage(pageKey, true);
+  const lines = sanitizeHorizontalGuideLines(state.horizontal || []);
+  if (!guideStatesEqual({ vertical: [], horizontal: state.horizontal || [] }, { vertical: [], horizontal: lines })) {
+    state.horizontal = lines.slice();
+  }
+
+  previewRowsRuler.innerHTML = '';
+  lines.forEach((y, idx) => {
+    const handle = document.createElement('button');
+    handle.type = 'button';
+    handle.className = 'preview-row-handle';
+    handle.dataset.rowIndex = String(idx);
+    handle.style.top = `${(y * 100).toFixed(3)}%`;
+    handle.title = `Move row guide ${idx + 1}`;
+    handle.setAttribute('aria-label', `Move row guide ${idx + 1}`);
+    previewRowsRuler.appendChild(handle);
+  });
+}
+
+function reorderColumnLayout(pageKey, sourceKey, targetKey) {
+  const layout = getColumnLayoutForPage(pageKey, true);
+  const from = layout.findIndex((col) => col.key === sourceKey);
+  const to = layout.findIndex((col) => col.key === targetKey);
+  if (from < 0 || to < 0 || from === to) return false;
+  const next = layout.slice();
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  setColumnLayoutForPage(pageKey, next);
+  applyColumnLayoutToGuides(pageKey, { recordHistory: false, invalidate: true, redraw: true });
+  renderPreviewColumnsRuler();
+  markActivePageDirty();
+  return true;
+}
+
+function applyColumnResize(pageKey, index, deltaRatio, options = {}) {
+  const opts = { redraw: true, invalidate: false, ...options };
+  const layout = getColumnLayoutForPage(pageKey, true);
+  if (index < 0 || index >= layout.length - 1) return false;
+  const left = layout[index];
+  const right = layout[index + 1];
+  if (!left || !right) return false;
+
+  const totalPair = left.width + right.width;
+  let leftWidth = left.width + deltaRatio;
+  let rightWidth = right.width - deltaRatio;
+
+  if (leftWidth < COLUMN_LAYOUT_MIN_WIDTH) {
+    leftWidth = COLUMN_LAYOUT_MIN_WIDTH;
+    rightWidth = totalPair - leftWidth;
+  }
+  if (rightWidth < COLUMN_LAYOUT_MIN_WIDTH) {
+    rightWidth = COLUMN_LAYOUT_MIN_WIDTH;
+    leftWidth = totalPair - rightWidth;
+  }
+  if (leftWidth < COLUMN_LAYOUT_MIN_WIDTH || rightWidth < COLUMN_LAYOUT_MIN_WIDTH) return false;
+
+  const next = layout.map((col) => ({ ...col }));
+  next[index].width = leftWidth;
+  next[index + 1].width = rightWidth;
+  setColumnLayoutForPage(pageKey, next);
+  applyColumnLayoutToGuides(pageKey, { recordHistory: false, invalidate: opts.invalidate, redraw: opts.redraw });
+  renderPreviewColumnsRuler();
+  return true;
+}
+
+function cloneGuideStateSnapshot(state) {
+  return {
+    vertical: dedupeSortedGuidePositions((state && state.vertical) || []),
+    horizontal: dedupeSortedGuidePositions((state && state.horizontal) || []),
+  };
+}
+
+function guideStatesEqual(a, b) {
+  const av = (a && a.vertical) || [];
+  const bv = (b && b.vertical) || [];
+  const ah = (a && a.horizontal) || [];
+  const bh = (b && b.horizontal) || [];
+  if (av.length !== bv.length || ah.length !== bh.length) return false;
+  for (let i = 0; i < av.length; i += 1) {
+    if (Math.abs(av[i] - bv[i]) > GUIDE_LINE_DUP_TOLERANCE) return false;
+  }
+  for (let i = 0; i < ah.length; i += 1) {
+    if (Math.abs(ah[i] - bh[i]) > GUIDE_LINE_DUP_TOLERANCE) return false;
+  }
+  return true;
+}
+
+function getGuideHistoryForPage(pageKey, create = false) {
+  if (!pageKey) return null;
+  const key = String(pageKey);
+  if (!guideHistoryByPage[key] && create) {
+    guideHistoryByPage[key] = { undo: [], redo: [] };
+  }
+  return guideHistoryByPage[key] || null;
+}
+
+function pushGuideUndoSnapshot(pageKey, snapshot) {
+  const history = getGuideHistoryForPage(pageKey, true);
+  history.undo.push(cloneGuideStateSnapshot(snapshot));
+  if (history.undo.length > GUIDE_HISTORY_LIMIT) {
+    history.undo.shift();
+  }
+  history.redo = [];
+}
+
+function applyGuideStateSnapshot(pageKey, snapshot) {
+  const state = getGuideStateForPage(pageKey, true);
+  const cloned = cloneGuideStateSnapshot(snapshot);
+  state.vertical = cloned.vertical;
+  state.horizontal = cloned.horizontal;
+}
+
+function invalidateGuideDerivedData(pageKey) {
+  delete sectionOcrResultsByPage[pageKey];
+  renderSectionOcrResultForPage(pageKey);
+}
+
+function canUndoGuides(pageKey) {
+  const history = getGuideHistoryForPage(pageKey, false);
+  return Boolean(history && history.undo.length);
+}
+
+function canRedoGuides(pageKey) {
+  const history = getGuideHistoryForPage(pageKey, false);
+  return Boolean(history && history.redo.length);
+}
+
+function getGuideSectionsForPage(pageKey) {
+  if (isTextOnlyToolsMode()) return [];
+  ensureColumnLayoutForPage(pageKey);
+  const state = getGuideStateForPage(pageKey, false);
+  const xs = dedupeSortedGuidePositions([0, ...(state.vertical || []), 1]);
+  const ys = dedupeSortedGuidePositions([0, ...(state.horizontal || []), 1]);
+  const sections = [];
+  for (let yi = 0; yi < ys.length - 1; yi += 1) {
+    for (let xi = 0; xi < xs.length - 1; xi += 1) {
+      sections.push({
+        x1: xs[xi],
+        y1: ys[yi],
+        x2: xs[xi + 1],
+        y2: ys[yi + 1],
+      });
+    }
+  }
+  return sections;
+}
+
+function updateGuideSectionsInfo() {
+  if (!guideSectionsInfo) return;
+  const pageKey = currentPageKey();
+  if (!pageKey) {
+    guideSectionsInfo.textContent = '';
+    return;
+  }
+  const state = getGuideStateForPage(pageKey, false);
+  const lineCount = (state.vertical || []).length + (state.horizontal || []).length;
+  if (!lineCount) {
+    guideSectionsInfo.textContent = 'No guides';
+    return;
+  }
+  const sections = getGuideSectionsForPage(pageKey);
+  guideSectionsInfo.textContent = `${lineCount} line${lineCount === 1 ? '' : 's'} • ${sections.length} section${sections.length === 1 ? '' : 's'}`;
+}
+
+function setSectionOcrBusy(active) {
+  sectionOcrInFlight = !!active;
+  if (runSectionOcrBtn) {
+    runSectionOcrBtn.disabled = sectionOcrInFlight || !pageList.length || !currentJobId;
+    runSectionOcrBtn.textContent = sectionOcrInFlight ? 'OCR...' : 'OCR';
+  }
+}
+
+function setImageToolBusy(active) {
+  imageToolInFlight = !!active;
+  updateGuideToolButtons();
+}
+
+function imageToolLabel(tool) {
+  const key = String(tool || '').toLowerCase();
+  const map = {
+    deskew: 'Deskew',
+    contrast: 'Contrast',
+    binarize: 'Binarize',
+    denoise: 'Denoise',
+    sharpen: 'Sharpen',
+    remove_lines: 'Remove lines',
+    reset: 'Reset cleanup',
+  };
+  return map[key] || key;
+}
+
+async function applyImageToolForCurrentPage(tool) {
+  if (!tool || !currentJobId || !pageList.length || imageToolInFlight) return;
+  const pageKey = currentPageKey();
+  if (!pageKey) return;
+
+  try {
+    setImageToolBusy(true);
+    const res = await fetchAuthed(`/jobs/${currentJobId}/pages/${pageKey}/image-tool`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tool }),
+    });
+    const body = await safeParseJson(res);
+    if (!res.ok) {
+      throw new Error((body && body.detail) || `Failed to apply ${imageToolLabel(tool)}`);
+    }
+    await refreshCurrentPageData(pageKey);
+    renderCurrentPage();
+  } catch (err) {
+    alert(err.message || `Failed to apply ${imageToolLabel(tool)}`);
+  } finally {
+    setImageToolBusy(false);
+  }
+}
+
+function startSectionOcrProgress(sectionCount) {
+  if (sectionOcrProgressTimer) {
+    clearInterval(sectionOcrProgressTimer);
+    sectionOcrProgressTimer = null;
+  }
+  sectionOcrProgressValue = 10;
+  startElapsedTimer();
+  const label = `Running section OCR (${sectionCount} section${sectionCount === 1 ? '' : 's'})`;
+  updateProgressUI(sectionOcrProgressValue, label, 'section_ocr', 'tesseract', 'ocr');
+  sectionOcrProgressTimer = setInterval(() => {
+    const bump = sectionOcrProgressValue < 60 ? 4 : 2;
+    sectionOcrProgressValue = Math.min(92, sectionOcrProgressValue + bump);
+    updateProgressUI(sectionOcrProgressValue, label, 'section_ocr', 'tesseract', 'ocr');
+  }, 700);
+}
+
+function finishSectionOcrProgress(ok, sectionCount = 0, errMessage = '') {
+  if (sectionOcrProgressTimer) {
+    clearInterval(sectionOcrProgressTimer);
+    sectionOcrProgressTimer = null;
+  }
+  if (ok) {
+    updateProgressUI(
+      100,
+      `Section OCR completed (${sectionCount} section${sectionCount === 1 ? '' : 's'})`,
+      'section_ocr',
+      'tesseract',
+      'ocr'
+    );
+  } else {
+    const fallback = errMessage || 'Section OCR failed';
+    updateProgressUI(Math.max(0, sectionOcrProgressValue), fallback, 'failed', 'tesseract', 'ocr');
+  }
+  stopElapsedTimer();
+}
+
+function renderSectionOcrResultForPage(pageKey) {
+  if (!sectionOcrResult) return;
+  sectionOcrResult.innerHTML = '';
+  sectionOcrResult.classList.add('is-hidden');
+}
+
+function normalizeSectionText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function detectSectionHeaderRole(text) {
+  const t = normalizeSectionText(text).toLowerCase();
+  if (!t) return '';
+  if (/\b(book\s+date|value\s+date|posting\s+date|date)\b/.test(t)) return 'date';
+  if (/\b(description|particulars?|details?|transaction)\b/.test(t)) return 'description';
+  if (/\b(debit|withdraw(al)?|debits|dr)\b/.test(t)) return 'debit';
+  if (/\b(credit|deposit|credits|cr)\b/.test(t)) return 'credit';
+  if (/\b(balance|ending\s+balance|closing\s+balance|end\s+balance)\b/.test(t)) return 'balance';
+  return '';
+}
+
+function inferSectionRoleByIndex(index, totalCols) {
+  if (totalCols >= 5) {
+    return ['date', 'description', 'debit', 'credit', 'balance'][index] || 'description';
+  }
+  if (totalCols === 4) {
+    return ['date', 'description', 'debit', 'balance'][index] || 'description';
+  }
+  if (totalCols === 3) {
+    return ['date', 'description', 'balance'][index] || 'description';
+  }
+  if (totalCols === 2) {
+    return ['date', 'description'][index] || 'description';
+  }
+  return 'description';
+}
+
+function groupOcrSectionsByRow(sections) {
+  const bands = [];
+  const tol = 0.01;
+  const sorted = [...sections].sort((a, b) => {
+    const ay = Number(a.y1 || 0);
+    const by = Number(b.y1 || 0);
+    if (Math.abs(ay - by) > 0.0001) return ay - by;
+    return Number(a.x1 || 0) - Number(b.x1 || 0);
+  });
+
+  sorted.forEach((cell) => {
+    const y1 = Number(cell.y1 || 0);
+    const y2 = Number(cell.y2 || 0);
+    let band = bands.find((b) => Math.abs(b.y1 - y1) <= tol && Math.abs(b.y2 - y2) <= tol);
+    if (!band) {
+      band = { y1, y2, cells: [] };
+      bands.push(band);
+    } else {
+      band.y1 = Math.min(band.y1, y1);
+      band.y2 = Math.max(band.y2, y2);
+    }
+    band.cells.push(cell);
+  });
+
+  bands.forEach((band) => {
+    band.cells.sort((a, b) => Number(a.x1 || 0) - Number(b.x1 || 0));
+  });
+  bands.sort((a, b) => a.y1 - b.y1);
+  return bands;
+}
+
+function detectSectionHeaderBandIndex(bands) {
+  let bestIdx = -1;
+  let bestScore = 0;
+  bands.forEach((band, idx) => {
+    const roles = new Set();
+    band.cells.forEach((cell) => {
+      const role = detectSectionHeaderRole(cell.text);
+      if (role) roles.add(role);
+    });
+    if (roles.size < 2) return;
+    let score = roles.size;
+    if (roles.has('date')) score += 1;
+    if (roles.has('balance')) score += 1;
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = idx;
+    }
+  });
+  return bestIdx;
+}
+
+function buildSectionColumnRoles(headerBand) {
+  const fallback = ['date', 'description', 'debit', 'credit', 'balance'];
+  const roles = headerBand.cells.map((cell, idx) => {
+    const detected = detectSectionHeaderRole(cell.text);
+    return detected || fallback[idx] || 'description';
+  });
+  return roles;
+}
+
+function extractAmountLikeText(text) {
+  const raw = normalizeSectionText(text);
+  if (!raw) return '';
+  const parsed = normalizeAmount(raw);
+  if (!Number.isFinite(parsed)) return '';
+  return String(parsed);
+}
+
+function rowSeemsHeaderLike(row) {
+  const combined = normalizeSectionText(`${row.date} ${row.description} ${row.debit} ${row.credit} ${row.balance}`).toLowerCase();
+  let headerHints = 0;
+  if (/\bdate\b/.test(combined)) headerHints += 1;
+  if (/\bdescription|particulars?|details?\b/.test(combined)) headerHints += 1;
+  if (/\bdebit|credit|balance\b/.test(combined)) headerHints += 1;
+  return headerHints >= 2;
+}
+
+function convertSectionOcrToTableRows(pageKey, payload) {
+  const rawSections = Array.isArray(payload && payload.sections) ? payload.sections : [];
+  if (!rawSections.length) return { rows: [], bounds: [] };
+
+  const sections = rawSections.map((sec) => ({
+    x1: Number(sec.x1 || 0),
+    y1: Number(sec.y1 || 0),
+    x2: Number(sec.x2 || 0),
+    y2: Number(sec.y2 || 0),
+    text: normalizeSectionText(sec.text),
+  }));
+
+  const bands = groupOcrSectionsByRow(sections);
+  if (!bands.length) return { rows: [], bounds: [] };
+
+  const manualRoles = getColumnRolesForPage(pageKey);
+  const headerIdx = manualRoles && manualRoles.length ? -1 : detectSectionHeaderBandIndex(bands);
+  const columnRoles = (manualRoles && manualRoles.length)
+    ? manualRoles
+    : (headerIdx >= 0 ? buildSectionColumnRoles(bands[headerIdx]) : null);
+  const dataBands = headerIdx >= 0 ? bands.slice(headerIdx + 1) : bands;
+
+  const rows = [];
+  const bounds = [];
+  let rowCounter = 1;
+
+  dataBands.forEach((band) => {
+    const cells = band.cells || [];
+    if (!cells.length) return;
+
+    const row = {
+      row_id: String(rowCounter).padStart(3, '0'),
+      page: pageKey,
+      date: '',
+      description: '',
+      debit: '',
+      credit: '',
+      balance: '',
+    };
+
+    cells.forEach((cell, idx) => {
+      const text = normalizeSectionText(cell.text);
+      if (!text) return;
+      const role = (columnRoles && columnRoles[idx]) || inferSectionRoleByIndex(idx, cells.length);
+      if (role === 'description') {
+        row.description = row.description ? `${row.description} ${text}` : text;
+        return;
+      }
+      if (role === 'date') {
+        if (!row.date) row.date = text;
+        return;
+      }
+      if (role === 'debit') {
+        if (!row.debit) row.debit = extractAmountLikeText(text) || text;
+        return;
+      }
+      if (role === 'credit') {
+        if (!row.credit) row.credit = extractAmountLikeText(text) || text;
+        return;
+      }
+      if (role === 'balance') {
+        if (!row.balance) row.balance = extractAmountLikeText(text) || text;
+        return;
+      }
+      row.description = row.description ? `${row.description} ${text}` : text;
+    });
+
+    row.description = normalizeSectionText(row.description);
+    const hasAny = Boolean(
+      normalizeSectionText(row.date) ||
+      normalizeSectionText(row.description) ||
+      normalizeSectionText(row.debit) ||
+      normalizeSectionText(row.credit) ||
+      normalizeSectionText(row.balance)
+    );
+    if (!hasAny) return;
+    if (rowSeemsHeaderLike(row)) return;
+
+    const x1 = Math.max(0, Math.min(1, Math.min(...cells.map((c) => Number(c.x1 || 0)))));
+    const y1 = Math.max(0, Math.min(1, Math.min(...cells.map((c) => Number(c.y1 || 0)))));
+    const x2 = Math.max(0, Math.min(1, Math.max(...cells.map((c) => Number(c.x2 || 0)))));
+    const y2 = Math.max(0, Math.min(1, Math.max(...cells.map((c) => Number(c.y2 || 0)))));
+
+    row.x1 = x1;
+    row.y1 = y1;
+    row.x2 = x2;
+    row.y2 = y2;
+
+    rows.push(row);
+    bounds.push({
+      row_id: row.row_id,
+      x1,
+      y1,
+      x2,
+      y2,
+    });
+    rowCounter += 1;
+  });
+
+  return { rows, bounds };
+}
+
+async function runSectionOcrForCurrentPage() {
+  if (!currentJobId || !pageList.length) return;
+  const pageKey = currentPageKey();
+  if (!pageKey) return;
+  const sections = getGuideSectionsForPage(pageKey);
+  if (!sections.length) {
+    alert('No sections available for OCR.');
+    return;
+  }
+  try {
+    setSectionOcrBusy(true);
+    startSectionOcrProgress(sections.length);
+    const res = await fetchAuthed(`/jobs/${currentJobId}/pages/${pageKey}/ocr-sections`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sections,
+        guide_state: buildGuideStatePayload(pageKey),
+      }),
+    });
+    const body = await safeParseJson(res);
+    if (!res.ok) {
+      throw new Error((body && body.detail) || 'Section OCR failed');
+    }
+    const analyzerMeta = body && body.profile_analyzer ? body.profile_analyzer : null;
+    sectionOcrResultsByPage[pageKey] = body || { sections: [] };
+    renderSectionOcrResultForPage(pageKey);
+    const parsedRowsFromBackend = Array.isArray(body && body.parsed_rows) ? body.parsed_rows : [];
+    const parsedBoundsFromBackend = Array.isArray(body && body.parsed_bounds) ? body.parsed_bounds : [];
+    const converted = convertSectionOcrToTableRows(pageKey, body || {});
+    const finalRows = parsedRowsFromBackend.length ? parsedRowsFromBackend : converted.rows;
+    const finalBounds = parsedRowsFromBackend.length ? parsedBoundsFromBackend : converted.bounds;
+    if (finalRows.length) {
+      rowsByPage[pageKey] = finalRows;
+      boundsByPage[pageKey] = finalBounds;
+      setActiveEditorRows(finalRows, pageKey);
+      activeRowKey = parsedRows.length ? parsedRows[0].row_key : null;
+      markActivePageDirty();
+      renderCurrentPage();
+    } else {
+      alert('Section OCR completed, but no table rows were detected from the selected sections.');
+    }
+    finishSectionOcrProgress(true, Array.isArray(body && body.sections) ? body.sections.length : sections.length);
+    if (analyzerMeta) {
+      applyAnalyzerMetaToProgress(analyzerMeta, 'tesseract', 'ocr');
+    }
+  } catch (err) {
+    finishSectionOcrProgress(false, 0, err.message || 'Section OCR failed');
+    alert(err.message || 'Section OCR failed');
+  } finally {
+    setSectionOcrBusy(false);
+    updateGuideToolButtons();
+  }
+}
+
+function updateGuideToolButtons() {
+  const key = currentPageKey();
+  const textOnlyMode = isTextOnlyToolsMode();
+  renderOcrToolsToggle();
+  if (addHorizontalGuideBtn) {
+    addHorizontalGuideBtn.classList.toggle('is-active', activeGuideTool === 'horizontal');
+    addHorizontalGuideBtn.disabled = !key || textOnlyMode;
+  }
+  if (guideUndoBtn) {
+    guideUndoBtn.disabled = !key || !canUndoGuides(key) || textOnlyMode;
+  }
+  if (guideRedoBtn) {
+    guideRedoBtn.disabled = !key || !canRedoGuides(key) || textOnlyMode;
+  }
+  if (previewWrap) {
+    previewWrap.classList.toggle('guide-selecting', activeGuideTool !== 'none');
+  }
+  if (runSectionOcrBtn) {
+    runSectionOcrBtn.disabled = sectionOcrInFlight || !pageList.length || !currentJobId || textOnlyMode;
+  }
+  if (imageToolButtons.length) {
+    const disableImageTools = imageToolInFlight || sectionOcrInFlight || !pageList.length || !currentJobId || textOnlyMode;
+    imageToolButtons.forEach((btn) => {
+      btn.disabled = disableImageTools;
+    });
+  }
+  updateGuideSectionsInfo();
+  renderPreviewColumnsRuler();
+  renderPreviewRowsRuler();
+}
+
+function setActiveGuideTool(mode) {
+  const nextMode = (activeGuideTool === mode) ? 'none' : mode;
+  activeGuideTool = nextMode;
+  if (activeGuideTool !== 'none' && flattenMode) {
+    flattenMode = false;
+    flattenPoints = [];
+    updateFlattenButtons();
+  }
+  stopPreviewPan();
+  updateGuideToolButtons();
+  updatePreviewInteractionMode();
+}
+
+function clearGuideLinesForCurrentPage() {
+  const key = currentPageKey();
+  if (!key) return;
+  const state = getGuideStateForPage(key, true);
+  const before = cloneGuideStateSnapshot(state);
+  const columnVertical = computeVerticalLinesFromColumnLayout(getColumnLayoutForPage(key, true));
+  const hasHorizontal = before.horizontal.length > 0;
+  const sameVertical = guideStatesEqual(
+    { vertical: before.vertical, horizontal: [] },
+    { vertical: columnVertical, horizontal: [] }
+  );
+  if (!hasHorizontal && sameVertical) {
+    updateGuideToolButtons();
+    return;
+  }
+  pushGuideUndoSnapshot(key, before);
+  state.vertical = columnVertical;
+  state.horizontal = [];
+  markHorizontalGuideTouched(key);
+  invalidateGuideDerivedData(key);
+  syncColumnLayoutFromGuideState(key);
+  updateGuideSectionsInfo();
+  updateGuideToolButtons();
+  markActivePageDirty();
+  drawBoundingBoxes();
+}
+
+function addGuideLineForCurrentPage(orientation, position) {
+  if (orientation === 'vertical') return false;
+  const key = currentPageKey();
+  if (!key) return false;
+  const state = getGuideStateForPage(key, true);
+  const before = cloneGuideStateSnapshot(state);
+  const lines = orientation === 'vertical' ? state.vertical : state.horizontal;
+  const pos = normalizeGuidePosition(position);
+  if (lines.some((v) => Math.abs(v - pos) <= GUIDE_LINE_DUP_TOLERANCE)) {
+    return false;
+  }
+  lines.push(pos);
+  const after = cloneGuideStateSnapshot(state);
+  if (guideStatesEqual(before, after)) {
+    return false;
+  }
+  applyGuideStateSnapshot(key, after);
+  pushGuideUndoSnapshot(key, before);
+  markHorizontalGuideTouched(key);
+  invalidateGuideDerivedData(key);
+  updateGuideSectionsInfo();
+  updateGuideToolButtons();
+  markActivePageDirty();
+  return true;
+}
+
+function undoGuideLinesForCurrentPage() {
+  const key = currentPageKey();
+  if (!key) return false;
+  const history = getGuideHistoryForPage(key, false);
+  if (!history || !history.undo.length) {
+    updateGuideToolButtons();
+    return false;
+  }
+  const current = cloneGuideStateSnapshot(getGuideStateForPage(key, true));
+  const previous = history.undo.pop();
+  history.redo.push(current);
+  if (history.redo.length > GUIDE_HISTORY_LIMIT) {
+    history.redo.shift();
+  }
+  applyGuideStateSnapshot(key, previous);
+  syncColumnLayoutFromGuideState(key);
+  invalidateGuideDerivedData(key);
+  updateGuideSectionsInfo();
+  updateGuideToolButtons();
+  markActivePageDirty();
+  drawBoundingBoxes();
+  return true;
+}
+
+function redoGuideLinesForCurrentPage() {
+  const key = currentPageKey();
+  if (!key) return false;
+  const history = getGuideHistoryForPage(key, false);
+  if (!history || !history.redo.length) {
+    updateGuideToolButtons();
+    return false;
+  }
+  const current = cloneGuideStateSnapshot(getGuideStateForPage(key, true));
+  const next = history.redo.pop();
+  history.undo.push(current);
+  if (history.undo.length > GUIDE_HISTORY_LIMIT) {
+    history.undo.shift();
+  }
+  applyGuideStateSnapshot(key, next);
+  syncColumnLayoutFromGuideState(key);
+  invalidateGuideDerivedData(key);
+  updateGuideSectionsInfo();
+  updateGuideToolButtons();
+  markActivePageDirty();
+  drawBoundingBoxes();
+  return true;
+}
+
+function updatePreviewInteractionMode() {
+  if (!previewCanvas) return;
+  const canPlaceGuide = activeGuideTool !== 'none' && pageList.length && previewImage.naturalWidth;
+  const isFlattenInteractive = flattenMode && !flattenBusy;
+  previewCanvas.style.pointerEvents = (canPlaceGuide || isFlattenInteractive) ? 'auto' : 'none';
+}
+
+function getNormalizedPreviewPointFromEvent(e) {
+  if (!previewImage.naturalWidth || !previewWrap) return null;
+  const wrapRect = previewWrap.getBoundingClientRect();
+  const baseRect = getRenderedImageRect(previewImage);
+  const baseLeft = baseRect.left - wrapRect.left;
+  const baseTop = baseRect.top - wrapRect.top;
+  const baseW = baseRect.width;
+  const baseH = baseRect.height;
+  if (baseW <= 0 || baseH <= 0) return null;
+
+  const localX = e.clientX - wrapRect.left;
+  const localY = e.clientY - wrapRect.top;
+  const cx = baseLeft + (baseW / 2) + previewPanX;
+  const cy = baseTop + (baseH / 2) + previewPanY;
+  const xOnBase = ((localX - cx) / previewZoom) + (baseW / 2);
+  const yOnBase = ((localY - cy) / previewZoom) + (baseH / 2);
+  const x = xOnBase / baseW;
+  const y = yOnBase / baseH;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+  return { x, y };
+}
+
+function drawGuideLinesAndSections(ctx, pageKey, drawW, drawH) {
+  if (isTextOnlyToolsMode()) return;
+  const state = getGuideStateForPage(pageKey, false);
+  const vertical = dedupeSortedGuidePositions(state.vertical || []);
+  const horizontal = dedupeSortedGuidePositions(state.horizontal || []);
+  if (!vertical.length && !horizontal.length) return;
+
+  const xs = dedupeSortedGuidePositions([0, ...vertical, 1]);
+  const ys = dedupeSortedGuidePositions([0, ...horizontal, 1]);
+
+  ctx.save();
+
+  // Subtle section tinting to make segmentation zones visible.
+  for (let yi = 0; yi < ys.length - 1; yi += 1) {
+    for (let xi = 0; xi < xs.length - 1; xi += 1) {
+      if ((xi + yi) % 2 !== 0) continue;
+      const x1 = xs[xi] * drawW;
+      const y1 = ys[yi] * drawH;
+      const x2 = xs[xi + 1] * drawW;
+      const y2 = ys[yi + 1] * drawH;
+      ctx.fillStyle = 'rgba(20, 184, 166, 0.04)';
+      ctx.fillRect(x1, y1, Math.max(1, x2 - x1), Math.max(1, y2 - y1));
+    }
+  }
+
+  ctx.strokeStyle = 'rgba(13, 148, 136, 0.95)';
+  ctx.lineWidth = 1;
+
+  vertical.forEach((xNorm) => {
+    const x = xNorm * drawW;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, drawH);
+    ctx.stroke();
+  });
+
+  horizontal.forEach((yNorm) => {
+    const y = yNorm * drawH;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(drawW, y);
+    ctx.stroke();
+  });
+
+  ctx.restore();
+}
+
 async function doLogin() {
   const email = (authEmail && authEmail.value || '').trim();
   const password = (authPassword && authPassword.value || '').trim();
@@ -264,7 +1836,10 @@ async function doLogin() {
 }
 
 function doLogout() {
+  authRedirectInProgress = false;
+  clearActivePageAutosaveTimer();
   evaluatorSelectedSubmission = null;
+  clearEvaluatorManifestTimer();
   clearPreviewBlobCache();
   setAuthState('', '', '');
   setLegacyEditorVisible(false);
@@ -300,6 +1875,81 @@ function getSubmissionFilename(item) {
   if (!key) return '-';
   const parts = key.split('/').filter(Boolean);
   return parts.length ? parts[parts.length - 1] : key;
+}
+
+function normalizeBorrowerNameForCompare(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function getPageConcurrencyToken(pageStatus) {
+  const updated = String((pageStatus && pageStatus.updated_at) || '').trim();
+  if (updated) return updated;
+  const saved = String((pageStatus && pageStatus.saved_at) || '').trim();
+  return saved || null;
+}
+
+function pruneSelectedEvaluatorSubmissionIds() {
+  const validIds = new Set((evaluatorSubmissionsCache || []).map((item) => String(item.id || '')));
+  evaluatorSelectedSubmissionIds.forEach((id) => {
+    if (!validIds.has(id)) {
+      evaluatorSelectedSubmissionIds.delete(id);
+    }
+  });
+}
+
+function updateEvaluatorCombineButtonState() {
+  if (!evaluatorCombineBtn) return;
+  const count = evaluatorSelectedSubmissionIds.size;
+  evaluatorCombineBtn.disabled = evaluatorCombineInFlight || count < 2;
+  evaluatorCombineBtn.textContent = count > 0 ? `Combine Selected (${count})` : 'Combine Selected';
+}
+
+function getSelectedEvaluatorSubmissionItems() {
+  if (!evaluatorSelectedSubmissionIds.size) return [];
+  const mapById = new Map((evaluatorSubmissionsCache || []).map((item) => [String(item.id || ''), item]));
+  return Array.from(evaluatorSelectedSubmissionIds)
+    .map((id) => mapById.get(String(id)))
+    .filter(Boolean);
+}
+
+async function combineSelectedEvaluatorSubmissions() {
+  const selectedItems = getSelectedEvaluatorSubmissionItems();
+  if (selectedItems.length < 2) {
+    alert('Select at least two submissions to combine.');
+    return;
+  }
+  const borrowerKeys = selectedItems.map((item) => normalizeBorrowerNameForCompare(item.borrower_name));
+  if (borrowerKeys.some((key) => !key) || borrowerKeys.some((key) => key !== borrowerKeys[0])) {
+    alert('Combine only supports submissions with the same borrower name.');
+    return;
+  }
+
+  evaluatorCombineInFlight = true;
+  updateEvaluatorCombineButtonState();
+  try {
+    const selectedIds = selectedItems.map((item) => String(item.id));
+    const res = await fetchAuthed('/evaluator/submissions/combine', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ submission_ids: selectedIds }),
+    });
+    const body = await safeParseJson(res);
+    if (!res.ok) {
+      alert((body && body.detail) || 'Failed to combine submissions');
+      return;
+    }
+    evaluatorSelectedSubmissionIds = new Set();
+    updateEvaluatorCombineButtonState();
+    await loadEvaluatorSubmissions();
+    if (body && body.submission_id) {
+      alert(`Combined successfully. New submission: ${body.submission_id}`);
+    } else {
+      alert('Combined successfully.');
+    }
+  } finally {
+    evaluatorCombineInFlight = false;
+    updateEvaluatorCombineButtonState();
+  }
 }
 
 function renderAgentSubmissionTable(items) {
@@ -400,12 +2050,13 @@ function renderEvaluatorSubmissionTable(items) {
     const statusClass = `workflow-status workflow-status-${status.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
     const assignBtn = item.assigned_evaluator_id ? '' : `<button class="preview-nav workflow-mini-btn" data-action="assign" data-id="${item.id}">Assign</button>`;
     const openBtn = item.assigned_evaluator_id ? `<button class="preview-nav workflow-mini-btn" data-action="open" data-id="${item.id}">Open</button>` : '';
-    const agentLabel = item.agent_email || item.agent_id || '-';
+    const filename = getSubmissionFilename(item);
+    const checked = evaluatorSelectedSubmissionIds.has(String(item.id || '')) ? ' checked' : '';
     return `<tr>
+      <td><input type="checkbox" class="evaluator-select-checkbox" data-submission-id="${escapeHtml(String(item.id || ''))}"${checked}></td>
       <td>${escapeHtml(formatAgentSubmissionDate(item.created_at))}</td>
-      <td title="${escapeHtml(agentLabel)}">${escapeHtml(agentLabel)}</td>
-      <td>${escapeHtml(item.borrower_name || '-')}</td>
-      <td>${escapeHtml(item.lead_reference || '-')}</td>
+      <td class="submission-filename-cell" title="${escapeHtml(filename)}">${escapeHtml(filename)}</td>
+      <td title="${escapeHtml(item.borrower_name || '-')}">${escapeHtml(item.borrower_name || '-')}</td>
       <td class="agent-submission-id" title="${escapeHtml(item.id || '-')}">${escapeHtml(item.id || '-')}</td>
       <td><span class="${statusClass}">${escapeHtml(statusLabel)}</span></td>
       <td class="workflow-item-actions">${assignBtn}${openBtn}</td>
@@ -427,10 +2078,10 @@ function renderEvaluatorSubmissionTable(items) {
     <table class="agent-submissions-grid agent-submissions-grid-evaluator">
       <thead>
         <tr>
+          <th>Select</th>
           <th>Date</th>
-          <th>Agent</th>
+          <th>Filename</th>
           <th>Borrower Name</th>
-          <th>Lead Reference</th>
           <th>Submission ID</th>
           <th>Status</th>
           <th>Actions</th>
@@ -450,6 +2101,7 @@ function renderEvaluatorSubmissionTableFiltered() {
   const query = (evaluatorSearchInput && evaluatorSearchInput.value || '').trim().toLowerCase();
   if (!query) {
     evaluatorSubmissionList.innerHTML = renderEvaluatorSubmissionTable(evaluatorSubmissionsCache);
+    updateEvaluatorCombineButtonState();
     return;
   }
   const filtered = evaluatorSubmissionsCache.filter((item) => {
@@ -457,6 +2109,7 @@ function renderEvaluatorSubmissionTableFiltered() {
     return borrower.includes(query);
   });
   evaluatorSubmissionList.innerHTML = renderEvaluatorSubmissionTable(filtered);
+  updateEvaluatorCombineButtonState();
 }
 
 async function loadAgentSubmissions() {
@@ -479,7 +2132,8 @@ function updateAgentSubmitButtonState() {
   if (!agentSubmitBtn) return;
   if (isAgentSubmitting) return;
   const count = getAgentSelectedFiles().length;
-  agentSubmitBtn.disabled = count === 0;
+  const borrowerName = agentBorrowerName && agentBorrowerName.value ? agentBorrowerName.value.trim() : '';
+  agentSubmitBtn.disabled = count === 0 || !borrowerName;
   agentSubmitBtn.textContent = count > 0 ? `Submit Files (${count})` : 'Submit Files (0)';
 }
 
@@ -493,7 +2147,8 @@ function setAgentUploadProgress(percent, label) {
 function setAgentSubmittingState(active) {
   isAgentSubmitting = active;
   if (agentSubmitBtn) {
-    agentSubmitBtn.disabled = active || getAgentSelectedFiles().length === 0;
+    const borrowerName = agentBorrowerName && agentBorrowerName.value ? agentBorrowerName.value.trim() : '';
+    agentSubmitBtn.disabled = active || getAgentSelectedFiles().length === 0 || !borrowerName;
     agentSubmitBtn.classList.toggle('is-loading', active);
     if (active) {
       agentSubmitBtn.textContent = 'Submitting';
@@ -536,6 +2191,17 @@ function uploadAgentFile(file, parseMode, borrowerName, leadReference, onProgres
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve(body || {});
       } else {
+        if (xhr.status === 401) {
+          const detail = String((body && body.detail) || '').trim().toLowerCase();
+          if (
+            detail === 'token_expired' ||
+            detail === 'invalid_token' ||
+            detail === 'invalid_token_signature' ||
+            detail === 'missing_auth_token'
+          ) {
+            handleAuthExpired();
+          }
+        }
         reject(new Error((body && body.detail) || `Upload failed for ${file.name}`));
       }
     };
@@ -582,6 +2248,10 @@ async function submitAgentFile() {
   }
 
   const borrowerName = agentBorrowerName && agentBorrowerName.value.trim() ? agentBorrowerName.value.trim() : '';
+  if (!borrowerName) {
+    alert('Borrower name is required.');
+    return;
+  }
   const leadReference = agentLeadReference && agentLeadReference.value.trim() ? agentLeadReference.value.trim() : '';
   const parseMode = getSelectedParseMode();
 
@@ -622,6 +2292,7 @@ async function loadEvaluatorSubmissions() {
     return;
   }
   evaluatorSubmissionsCache = (body && body.items) || [];
+  pruneSelectedEvaluatorSubmissionIds();
   renderEvaluatorSubmissionTableFiltered();
 }
 
@@ -635,6 +2306,312 @@ async function assignEvaluatorSubmission(submissionId) {
   await loadEvaluatorSubmissions();
 }
 
+function normalizePageRowForEditor(row, pageKey, idx) {
+  const rowId = String(row.row_id || row.row_index || idx + 1).padStart(3, '0');
+  const mapped = {
+    row_key: createRowKey(),
+    global_row_id: rowId,
+    row_id: rowId,
+    date: row.date || '',
+    description: row.description || '',
+    debit: row.debit != null ? String(row.debit) : '',
+    credit: row.credit != null ? String(row.credit) : '',
+    balance: row.balance != null ? String(row.balance) : '',
+    page: pageKey,
+    page_row_id: rowId,
+    x1: row.x1,
+    y1: row.y1,
+    x2: row.x2,
+    y2: row.y2,
+  };
+  normalizeRowDisplayValues(mapped);
+  return mapped;
+}
+
+function setActiveEditorRows(rows, pageKey) {
+  parsedRows = (rows || []).map((row, idx) => normalizePageRowForEditor(row, pageKey, idx));
+  rowKeyCounter = 1;
+  parsedRows.forEach((row) => {
+    row.row_key = createRowKey();
+  });
+  pageRowToGlobal = {};
+  parsedRows.forEach((row) => {
+    pageRowToGlobal[`${pageKey}|${row.page_row_id}`] = row.global_row_id;
+  });
+  renderRows(parsedRows);
+  if (parsedRows.length) {
+    activeRowKey = parsedRows[0].row_key;
+    highlightSelectedTableRow();
+  } else {
+    activeRowKey = null;
+  }
+}
+
+function updateSummaryFromSnapshot(summary) {
+  if (!summary || typeof summary !== 'object') {
+    totalTransactions.textContent = '0';
+    totalDebitTransactions.textContent = '0';
+    totalCreditTransactions.textContent = '0';
+    endingBalance.textContent = '-';
+    renderMonthlySummary([]);
+    return;
+  }
+  totalTransactions.textContent = String(summary.total_transactions || 0);
+  totalDebitTransactions.textContent = String(summary.debit_transactions || 0);
+  totalCreditTransactions.textContent = String(summary.credit_transactions || 0);
+  endingBalance.textContent = Number.isFinite(Number(summary.adb))
+    ? formatPesoValue(Math.abs(Number(summary.adb)), true)
+    : '-';
+
+  const monthlySummaryBody = document.getElementById('monthlySummaryBody');
+  const monthlySummaryWrap = document.querySelector('.monthly-summary-wrap');
+  const monthly = Array.isArray(summary.monthly) ? summary.monthly : [];
+  if (!monthlySummaryBody) return;
+  if (!monthly.length) {
+    if (monthlySummaryWrap) monthlySummaryWrap.classList.add('is-empty');
+    monthlySummaryBody.innerHTML = '<tr><td class="monthly-empty" colspan="6">No monthly data</td></tr>';
+    return;
+  }
+  if (monthlySummaryWrap) monthlySummaryWrap.classList.remove('is-empty');
+  monthlySummaryBody.innerHTML = monthly.map((item) => (
+    `<tr>
+      <td>${escapeHtml(String(item.month || item.monthLabel || '-'))}</td>
+      <td>${escapeHtml(formatPesoValue(Math.abs(Number(item.debit || 0)), true))}</td>
+      <td>${escapeHtml(formatPesoValue(Math.abs(Number(item.credit || 0)), true))}</td>
+      <td>${escapeHtml(formatPesoValue(Math.abs(Number(item.avg_debit || item.avgDebit || 0)), true))}</td>
+      <td>${escapeHtml(formatPesoValue(Math.abs(Number(item.avg_credit || item.avgCredit || 0)), true))}</td>
+      <td>${escapeHtml(formatPesoValue(Number(item.adb || 0), true))}</td>
+    </tr>`
+  )).join('');
+}
+
+async function refreshSummarySnapshot() {
+  if (!evaluatorSelectedSubmission || !evaluatorSelectedSubmission.id) return;
+  const res = await fetchAuthed(`/evaluator/submissions/${evaluatorSelectedSubmission.id}`);
+  const body = await safeParseJson(res);
+  if (!res.ok) return;
+  const summary = body && body.summary ? body.summary : null;
+  updateSummaryFromSnapshot(summary);
+}
+
+async function loadPageManifest() {
+  if (!evaluatorSelectedSubmission || !evaluatorSelectedSubmission.id) return false;
+  const res = await fetchAuthed(`/evaluator/submissions/${evaluatorSelectedSubmission.id}/pages`);
+  const body = await safeParseJson(res);
+  if (!res.ok) {
+    const detail = (body && body.detail) ? String(body.detail) : `HTTP ${res.status}`;
+    throw new Error(`Page manifest failed: ${detail}`);
+  }
+  evaluatorManifest = Array.isArray(body.pages) ? body.pages : [];
+  evaluatorReviewProgress = body.review_progress || { total_pages: evaluatorManifest.length, parsed_pages: 0, reviewed_pages: 0, percent: 0 };
+  evaluatorCanExport = Boolean(body.can_export);
+  setSummaryLocked(!evaluatorCanExport);
+  if (evaluatorCanExport) {
+    await refreshSummarySnapshot();
+  }
+
+  pageList = evaluatorManifest.map((p) => `${p.page_key}.png`);
+  if (!pageList.length) {
+    activePageReviewStatus = 'pending';
+    renderActivePageSavedMark();
+    currentPageIndex = 0;
+    renderCurrentPage();
+    return true;
+  }
+  if (currentPageIndex >= pageList.length) {
+    currentPageIndex = pageList.length - 1;
+  }
+  syncPageSelect();
+  return true;
+}
+
+async function openEvaluatorSubmissionLegacyFallback(submission) {
+  if (!submission || !submission.current_job_id) return;
+  currentJobId = submission.current_job_id;
+  const statusRes = await fetchAuthed(`/jobs/${currentJobId}`);
+  const statusBody = await safeParseJson(statusRes);
+  if (statusRes.ok && statusBody && statusBody.status === 'done') {
+    updateProgressUI(
+      100,
+      'Results ready',
+      statusBody.step || 'completed',
+      statusBody.ocr_backend,
+      statusBody.parse_mode,
+      statusBody
+    );
+    stopElapsedTimer();
+    await loadResults();
+    return;
+  }
+  if (statusRes.ok && statusBody && statusBody.status === 'failed') {
+    const failedStep = statusBody.step || statusBody.status || 'failed';
+    const failedProgress = Number.isFinite(statusBody.progress) ? statusBody.progress : inferProgress(statusBody.status, failedStep);
+    updateProgressUI(
+      failedProgress,
+      statusBody.message || 'OCR job failed',
+      failedStep,
+      statusBody.ocr_backend,
+      statusBody.parse_mode,
+      statusBody
+    );
+    stopElapsedTimer();
+    alert('Job failed. Check diagnostics.');
+    return;
+  }
+  if (statusRes.ok && statusBody && statusBody.status === 'processing') {
+    startElapsedTimer();
+    try {
+      await pollJobUntilDone();
+    } finally {
+      stopElapsedTimer();
+    }
+    return;
+  }
+  const startRes = await fetchAuthed(`/jobs/${currentJobId}/start`, { method: 'POST' });
+  const startBody = await safeParseJson(startRes);
+  if (!startRes.ok) {
+    throw new Error((startBody && startBody.detail) || 'Failed to start processing');
+  }
+  await loadEvaluatorSubmissions();
+  updateProgressUI(2, 'Processing started', 'processing');
+  startElapsedTimer();
+  try {
+    await pollJobUntilDone();
+  } finally {
+    stopElapsedTimer();
+  }
+}
+
+async function loadActivePage(pageKey) {
+  if (!evaluatorSelectedSubmission || !evaluatorSelectedSubmission.id) return;
+  clearActivePageAutosaveTimer();
+  const key = pageKey || currentPageKey();
+  if (!key) return;
+  const res = await fetchAuthed(`/evaluator/submissions/${evaluatorSelectedSubmission.id}/pages/${key}`);
+  const body = await safeParseJson(res);
+  if (!res.ok) {
+    activePageKey = key;
+    activePageReviewStatus = 'pending';
+    activePageDirty = false;
+    renderActivePageSavedMark();
+    return;
+  }
+  rowsByPage[key] = Array.isArray(body.rows) ? body.rows : [];
+  boundsByPage[key] = Array.isArray(body.bounds) ? body.bounds : [];
+  identityBoundsByPage[key] = Array.isArray(body.identity_bounds) ? body.identity_bounds : [];
+  applyGuideStatePayload(key, body.guide_state || {});
+  activePageUpdatedAt = getPageConcurrencyToken(body.page_status);
+  activePageReviewStatus = body.page_status && body.page_status.review_status ? String(body.page_status.review_status) : 'pending';
+  activePageKey = key;
+  activePageDirty = false;
+  renderActivePageSavedMark();
+  setActiveEditorRows(Array.isArray(body.rows) ? body.rows : [], key);
+  renderCurrentPage();
+}
+
+async function saveActivePageIfDirty(options = {}) {
+  const opts = { silent: false, ...options };
+  if (!evaluatorSelectedSubmission || !evaluatorSelectedSubmission.id) return true;
+  const pageKey = activePageKey || currentPageKey();
+  if (!pageKey) return true;
+  const status = String(activePageReviewStatus || '').toLowerCase();
+  const alreadySaved = status === 'saved' || status === 'reviewed';
+  if (!activePageDirty && alreadySaved) return true;
+  if (activePageSavePromise) {
+    return activePageSavePromise;
+  }
+  clearActivePageAutosaveTimer();
+  const doSave = async () => {
+    const payloadRows = parsedRows.map((row, idx) => ({
+      row_id: row.page_row_id || row.row_id || String(idx + 1).padStart(3, '0'),
+      page: pageKey,
+      date: row.date || '',
+      description: row.description || '',
+      debit: row.debit || '',
+      credit: row.credit || '',
+      balance: row.balance || '',
+      x1: row.x1,
+      y1: row.y1,
+      x2: row.x2,
+      y2: row.y2,
+    }));
+    const res = await fetchAuthed(`/evaluator/submissions/${evaluatorSelectedSubmission.id}/pages/${pageKey}/transactions`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rows: payloadRows,
+        expected_updated_at: activePageUpdatedAt,
+        guide_state: buildGuideStatePayload(pageKey),
+      }),
+    });
+    const body = await safeParseJson(res);
+    if (!res.ok) {
+      const detail = (body && body.detail) || 'Failed to auto-save page';
+      if (opts.silent) {
+        console.warn(detail);
+      } else {
+        alert(detail);
+      }
+      return false;
+    }
+    activePageDirty = false;
+    activePageUpdatedAt = getPageConcurrencyToken(body.page_status) || activePageUpdatedAt;
+    activePageReviewStatus = body.page_status && body.page_status.review_status ? String(body.page_status.review_status) : activePageReviewStatus;
+    if (pageKey && body.page_status) {
+      const idx = evaluatorManifest.findIndex((p) => String(p.page_key || '') === String(pageKey));
+      if (idx >= 0) {
+        evaluatorManifest[idx] = {
+          ...evaluatorManifest[idx],
+          review_status: body.page_status.review_status || evaluatorManifest[idx].review_status,
+          parse_status: body.page_status.parse_status || evaluatorManifest[idx].parse_status,
+          saved_at: body.page_status.saved_at || evaluatorManifest[idx].saved_at,
+          updated_at: body.page_status.updated_at || evaluatorManifest[idx].updated_at,
+          rows_count: Number.isFinite(body.page_status.rows_count) ? body.page_status.rows_count : evaluatorManifest[idx].rows_count,
+          has_unsaved: Boolean(body.page_status.has_unsaved),
+        };
+      }
+    }
+    renderActivePageSavedMark();
+    evaluatorCanExport = Boolean(body.can_export);
+    setSummaryLocked(!evaluatorCanExport);
+    if (body.summary && evaluatorCanExport) {
+      updateSummaryFromSnapshot(body.summary);
+    }
+    return true;
+  };
+  activePageSaveInFlight = true;
+  activePageSavePromise = doSave();
+  try {
+    return await activePageSavePromise;
+  } finally {
+    activePageSaveInFlight = false;
+    activePageSavePromise = null;
+  }
+}
+
+async function switchToPageByIndex(nextIndex) {
+  if (!pageList.length) return;
+  const bounded = Math.max(0, Math.min(pageList.length - 1, nextIndex));
+  if (bounded === currentPageIndex && activePageKey) return;
+  clearActivePageAutosaveTimer();
+  const ok = await saveActivePageIfDirty();
+  if (!ok) return;
+  currentPageIndex = bounded;
+  const key = currentPageKey();
+  await loadActivePage(key);
+}
+
+async function triggerBackgroundParseForNextPendingPage() {
+  if (!evaluatorSelectedSubmission || !evaluatorSelectedSubmission.id) return;
+  const target = evaluatorManifest.find((page) => String(page.parse_status || '').toLowerCase() === 'pending');
+  if (!target) return;
+  try {
+    await fetchAuthed(`/evaluator/submissions/${evaluatorSelectedSubmission.id}/pages/${target.page_key}/parse`, { method: 'POST' });
+  } catch (_err) {
+    // Non-blocking by design.
+  }
+}
+
 async function openEvaluatorSubmission(submissionId) {
   const res = await fetchAuthed(`/evaluator/submissions/${submissionId}`);
   const body = await safeParseJson(res);
@@ -646,6 +2623,12 @@ async function openEvaluatorSubmission(submissionId) {
   if (!evaluatorSelectedSubmission) return;
   updateWorkflowVisibility();
   scrollToResults();
+  clearEvaluatorManifestTimer();
+  resetResults();
+  resetStatusStallTracker();
+  resetProgressUI();
+  updateProgressUI(0, 'For Review', 'for_review');
+  setSummaryLocked(true);
   currentJobId = evaluatorSelectedSubmission.current_job_id;
   if (!currentJobId) {
     parsedRows = (body.transactions || []).map((row, idx) => ({
@@ -661,59 +2644,132 @@ async function openEvaluatorSubmission(submissionId) {
       page_row_id: '',
     }));
     renderRows(parsedRows);
+    const canExport = Boolean(body.review_status && body.review_status.can_export);
+    setSummaryLocked(!canExport);
+    if (body.summary && canExport) {
+      updateSummaryFromSnapshot(body.summary);
+    }
     return;
   }
 
   const shouldStartProcessing = String(evaluatorSelectedSubmission.status || '').toLowerCase() === 'for_review';
   if (shouldStartProcessing) {
-    const startRes = await fetchAuthed(`/jobs/${currentJobId}/start`, { method: 'POST' });
-    const startBody = await safeParseJson(startRes);
-    if (!startRes.ok) {
-      alert((startBody && startBody.detail) || 'Failed to start processing');
-      return;
+    let canStart = true;
+    const preStatusRes = await fetchAuthed(`/jobs/${currentJobId}`);
+    const preStatusBody = await safeParseJson(preStatusRes);
+    if (preStatusRes.ok && preStatusBody) {
+      const preState = String(preStatusBody.status || '').toLowerCase();
+      if (preState === 'done') {
+        canStart = false;
+        stopElapsedTimer();
+      } else if (preState === 'processing' || preState === 'queued') {
+        canStart = false;
+        startElapsedTimer();
+      }
     }
-    await loadEvaluatorSubmissions();
-    updateProgressUI(0, 'Processing started', 'processing');
-    startElapsedTimer();
-    try {
-      await pollJobUntilDone();
-    } finally {
-      stopElapsedTimer();
+    if (canStart) {
+      const startRes = await fetchAuthed(`/jobs/${currentJobId}/start`, { method: 'POST' });
+      const startBody = await safeParseJson(startRes);
+      if (!startRes.ok) {
+        alert((startBody && startBody.detail) || 'Failed to start processing');
+        return;
+      }
+      evaluatorSelectedSubmission.status = 'processing';
+      await loadEvaluatorSubmissions();
+      updateProgressUI(2, 'Processing started', 'processing');
+      startElapsedTimer();
     }
-    return;
   }
 
-  const statusRes = await fetchAuthed(`/jobs/${currentJobId}`);
-  const statusBody = await safeParseJson(statusRes);
-  if (statusRes.ok && statusBody && statusBody.status === 'done') {
+  try {
+    await loadPageManifest();
+  } catch (err) {
+    console.warn(err.message || 'Manifest flow unavailable, falling back to legacy flow');
+    setSummaryLocked(true);
+    await openEvaluatorSubmissionLegacyFallback(evaluatorSelectedSubmission);
+    return;
+  }
+  await loadAccountSummary();
+
+  if (areAllManifestPagesParsed()) {
+    updateProgressUI(100, 'Results ready', 'completed');
     stopElapsedTimer();
-    await loadResults();
-  } else if (statusRes.ok && statusBody && statusBody.status === 'failed') {
-    stopElapsedTimer();
-    alert('Job failed. Check diagnostics.');
-  } else if (statusRes.ok && statusBody && statusBody.status === 'processing') {
-    startElapsedTimer();
-    try {
-      await pollJobUntilDone();
-    } finally {
+  }
+
+  const firstReadyIndex = evaluatorManifest.findIndex((page) => {
+    const state = String(page.parse_status || '').toLowerCase();
+    return state === 'done' || state === 'failed';
+  });
+  const fallbackIndex = firstReadyIndex >= 0 ? firstReadyIndex : 0;
+  currentPageIndex = fallbackIndex;
+  const targetKey = currentPageKey();
+  if (targetKey) {
+    await loadActivePage(targetKey);
+  } else {
+    renderCurrentPage();
+  }
+
+  const initialStatusRes = await fetchAuthed(`/jobs/${currentJobId}`);
+  const initialStatus = await safeParseJson(initialStatusRes);
+  if (initialStatusRes.ok && initialStatus) {
+    if ((initialStatus.status === 'processing' || initialStatus.status === 'queued') && areAllManifestPagesParsed()) {
+      initialStatus.status = 'done';
+      initialStatus.step = 'completed';
+      initialStatus.progress = 100;
+    }
+    const step = initialStatus.step || initialStatus.status || 'processing';
+    const progress = Number.isFinite(initialStatus.progress) ? initialStatus.progress : inferProgress(initialStatus.status, step);
+    updateProgressUI(progress, stepToLabel(step), step, initialStatus.ocr_backend, initialStatus.parse_mode, initialStatus);
+    if (initialStatus.status === 'processing' || initialStatus.status === 'queued') {
+      startElapsedTimer();
+    } else {
       stopElapsedTimer();
     }
-  } else {
-    const startRes = await fetchAuthed(`/jobs/${currentJobId}/start`, { method: 'POST' });
-    const startBody = await safeParseJson(startRes);
-    if (!startRes.ok) {
-      alert((startBody && startBody.detail) || 'Failed to start processing');
+  } else if (areAllManifestPagesParsed()) {
+    updateProgressUI(100, 'Results ready', 'completed');
+    stopElapsedTimer();
+  }
+
+  evaluatorManifestTimer = setInterval(async () => {
+    if (!evaluatorSelectedSubmission || evaluatorSelectedSubmission.id !== submissionId) {
+      clearEvaluatorManifestTimer();
       return;
     }
-    await loadEvaluatorSubmissions();
-    updateProgressUI(0, 'Processing started', 'processing');
-    startElapsedTimer();
-    try {
-      await pollJobUntilDone();
-    } finally {
-      stopElapsedTimer();
+    await loadPageManifest();
+    const activeKey = currentPageKey();
+    const activeManifest = evaluatorManifest[currentPageIndex] || null;
+    if (!activePageKey && activeKey) {
+      await loadActivePage(activeKey);
+    } else if (activeKey && activeManifest && String(activeManifest.parse_status || '').toLowerCase() === 'done' && !parsedRows.length) {
+      await loadActivePage(activeKey);
     }
-  }
+    const statusRes = await fetchAuthed(`/jobs/${currentJobId}`);
+    const statusBody = await safeParseJson(statusRes);
+    if (statusRes.ok && statusBody) {
+      if (isStatusStalled(statusBody)) {
+        updateProgressUI(100, 'Processing appears stalled', 'failed', statusBody.ocr_backend, statusBody.parse_mode, statusBody);
+        stopElapsedTimer();
+        clearEvaluatorManifestTimer();
+        return;
+      }
+      if ((statusBody.status === 'processing' || statusBody.status === 'queued') && areAllManifestPagesParsed()) {
+        statusBody.status = 'done';
+        statusBody.step = 'completed';
+        statusBody.progress = 100;
+      }
+      const step = statusBody.step || statusBody.status || 'processing';
+      const progress = Number.isFinite(statusBody.progress) ? statusBody.progress : inferProgress(statusBody.status, step);
+      updateProgressUI(progress, stepToLabel(step), step, statusBody.ocr_backend, statusBody.parse_mode, statusBody);
+      if (statusBody.status === 'done' || statusBody.status === 'failed') {
+        stopElapsedTimer();
+        clearEvaluatorManifestTimer();
+      }
+    } else if (areAllManifestPagesParsed()) {
+      updateProgressUI(100, 'Results ready', 'completed');
+      stopElapsedTimer();
+      clearEvaluatorManifestTimer();
+    }
+  }, 1500);
 }
 
 async function runEvaluatorStartProcessing() {
@@ -741,26 +2797,9 @@ async function saveEvaluatorEdits() {
     alert('Open a submission first.');
     return;
   }
-  const rows = parsedRows.map((r, idx) => ({
-    row_id: r.row_id || String(idx + 1).padStart(3, '0'),
-    page: r.page || currentPageKey(),
-    date: r.date || '',
-    description: r.description || '',
-    debit: r.debit || '',
-    credit: r.credit || '',
-    balance: r.balance || '',
-  }));
-  const res = await fetchAuthed(`/evaluator/submissions/${evaluatorSelectedSubmission.id}/transactions`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rows }),
-  });
-  const body = await safeParseJson(res);
-  if (!res.ok) {
-    alert((body && body.detail) || 'Save failed');
-    return;
-  }
-  alert('Edits saved.');
+  const ok = await saveActivePageIfDirty();
+  if (!ok) return;
+  alert('Page saved.');
 }
 
 async function runEvaluatorAnalyze() {
@@ -800,6 +2839,40 @@ async function runEvaluatorSummaryReady() {
   alert('Marked as summary_ready.');
 }
 
+async function finishEvaluatorReview() {
+  if (!evaluatorSelectedSubmission || !evaluatorSelectedSubmission.id) {
+    alert('Open a submission first.');
+    return;
+  }
+  const saved = await saveActivePageIfDirty();
+  if (!saved) return;
+  if (finishReviewBtn) finishReviewBtn.disabled = true;
+  try {
+    const res = await fetchAuthed(
+      `/evaluator/submissions/${evaluatorSelectedSubmission.id}/finish-review`,
+      { method: 'POST' }
+    );
+    const body = await safeParseJson(res);
+    if (!res.ok) {
+      alert((body && body.detail) || 'Failed to finish review');
+      return;
+    }
+    evaluatorCanExport = Boolean(body && body.can_export);
+    setSummaryLocked(!evaluatorCanExport);
+    if (body && body.summary) {
+      updateSummaryFromSnapshot(body.summary);
+    } else {
+      await refreshSummarySnapshot();
+    }
+    await loadPageManifest();
+    alert(evaluatorCanExport
+      ? 'Review finished. Summary unlocked and exports enabled.'
+      : 'Review finished, but no transactions were found for export.');
+  } finally {
+    if (finishReviewBtn) finishReviewBtn.disabled = !summaryCard || !summaryCard.classList.contains('is-locked');
+  }
+}
+
 if (authLoginBtn) authLoginBtn.addEventListener('click', doLogin);
 if (authLogoutBtn) authLogoutBtn.addEventListener('click', doLogout);
 if (agentSubmitBtn) agentSubmitBtn.addEventListener('click', submitAgentFile);
@@ -812,6 +2885,11 @@ if (agentBrowseButton && agentFileInput) {
 if (agentFileInput) {
   agentFileInput.addEventListener('change', () => {
     renderAgentSelectedFiles();
+  });
+}
+if (agentBorrowerName) {
+  agentBorrowerName.addEventListener('input', () => {
+    updateAgentSubmitButtonState();
   });
 }
 if (agentSearchInput) {
@@ -877,8 +2955,26 @@ if (agentDropZone && agentFileInput) {
 }
 renderAgentSelectedFiles();
 updateAgentSubmitButtonState();
+updateEvaluatorCombineButtonState();
 if (evaluatorRefreshBtn) evaluatorRefreshBtn.addEventListener('click', loadEvaluatorSubmissions);
+if (evaluatorCombineBtn) {
+  evaluatorCombineBtn.addEventListener('click', async () => {
+    await combineSelectedEvaluatorSubmissions();
+  });
+}
 if (evaluatorSubmissionList) {
+  evaluatorSubmissionList.addEventListener('change', (e) => {
+    const checkbox = e.target.closest('input.evaluator-select-checkbox');
+    if (!checkbox) return;
+    const submissionId = String(checkbox.dataset.submissionId || '').trim();
+    if (!submissionId) return;
+    if (checkbox.checked) {
+      evaluatorSelectedSubmissionIds.add(submissionId);
+    } else {
+      evaluatorSelectedSubmissionIds.delete(submissionId);
+    }
+    updateEvaluatorCombineButtonState();
+  });
   evaluatorSubmissionList.addEventListener('click', async (e) => {
     const pageBtn = e.target.closest('button.agent-page-btn');
     if (pageBtn) {
@@ -906,11 +3002,13 @@ if (evaluatorSubmissionList) {
       return;
     }
     if (action === 'open') {
+      if (evaluatorSelectedSubmission && evaluatorSelectedSubmission.id && evaluatorSelectedSubmission.id !== submissionId) {
+        await saveActivePageIfDirty();
+      }
       await openEvaluatorSubmission(submissionId);
     }
   });
 }
-
 if (authToken && authRole) {
   if (forcedPageRole === 'agent' && authRole !== 'agent') {
     if (authRole === 'credit_evaluator') {
@@ -1003,20 +3101,49 @@ if (downloadCSV) {
   });
 }
 
+if (finishReviewBtn) {
+  finishReviewBtn.addEventListener('click', async () => {
+    await finishEvaluatorReview();
+  });
+}
+
 if (exportExcelBtn) {
   exportExcelBtn.addEventListener('click', async () => {
     await exportToExcel();
   });
 }
 
+if (ocrToolsToggleBtn) {
+  ocrToolsToggleBtn.addEventListener('click', () => {
+    ocrToolsUnlocked = !canUseOcrTools();
+    if (!canUseOcrTools()) {
+      activeGuideTool = 'none';
+      flattenMode = false;
+      flattenPoints = [];
+    }
+    renderOcrToolsToggle();
+    updateFlattenButtons();
+    updateGuideToolButtons();
+    drawBoundingBoxes();
+  });
+}
+
 prevPageBtn.addEventListener('click', () => {
   if (currentPageIndex <= 0) return;
+  if (authRole === 'credit_evaluator' && evaluatorSelectedSubmission) {
+    switchToPageByIndex(currentPageIndex - 1);
+    return;
+  }
   currentPageIndex -= 1;
   renderCurrentPage();
 });
 
 nextPageBtn.addEventListener('click', () => {
   if (currentPageIndex >= pageList.length - 1) return;
+  if (authRole === 'credit_evaluator' && evaluatorSelectedSubmission) {
+    switchToPageByIndex(currentPageIndex + 1);
+    return;
+  }
   currentPageIndex += 1;
   renderCurrentPage();
 });
@@ -1025,6 +3152,10 @@ if (pageSelect) {
   pageSelect.addEventListener('change', () => {
     const idx = Number.parseInt(pageSelect.value, 10);
     if (!Number.isFinite(idx) || idx < 0 || idx >= pageList.length) return;
+    if (authRole === 'credit_evaluator' && evaluatorSelectedSubmission) {
+      switchToPageByIndex(idx);
+      return;
+    }
     currentPageIndex = idx;
     renderCurrentPage();
   });
@@ -1032,7 +3163,9 @@ if (pageSelect) {
 
 previewImage.addEventListener('load', () => {
   previewImage.style.display = 'block';
+  setPreviewAspectRatioFromImage();
   resetPreviewTransform();
+  updatePreviewInteractionMode();
   drawBoundingBoxes();
   maybeFocusActiveRowInPreview();
 });
@@ -1042,6 +3175,10 @@ previewImage.addEventListener('error', () => {
 });
 
 window.addEventListener('resize', () => {
+  if (previewImage && previewImage.naturalWidth) {
+    setPreviewAspectRatioFromImage();
+  }
+  syncTablePanelHeightToPreview();
   if (pageList.length) {
     drawBoundingBoxes();
   }
@@ -1056,31 +3193,23 @@ document.addEventListener('click', (e) => {
 });
 
 previewCanvas.addEventListener('click', (e) => {
-  if (!flattenMode || flattenBusy) return;
-  if (!previewImage.naturalWidth || !previewWrap) return;
+  if (isTextOnlyToolsMode()) return;
+  const point = getNormalizedPreviewPointFromEvent(e);
+  if (!point) return;
 
-  const wrapRect = previewWrap.getBoundingClientRect();
-  const baseRect = getRenderedImageRect(previewImage);
-  const baseLeft = baseRect.left - wrapRect.left;
-  const baseTop = baseRect.top - wrapRect.top;
-  const baseW = baseRect.width;
-  const baseH = baseRect.height;
-  if (baseW <= 0 || baseH <= 0) return;
+  if (flattenMode && !flattenBusy) {
+    if (flattenPoints.length >= 4) return;
+    flattenPoints.push({ x: point.x, y: point.y });
+    updateFlattenButtons();
+    drawBoundingBoxes();
+    return;
+  }
 
-  const localX = e.clientX - wrapRect.left;
-  const localY = e.clientY - wrapRect.top;
-  const cx = baseLeft + (baseW / 2) + previewPanX;
-  const cy = baseTop + (baseH / 2) + previewPanY;
-  const xOnBase = ((localX - cx) / previewZoom) + (baseW / 2);
-  const yOnBase = ((localY - cy) / previewZoom) + (baseH / 2);
-  const x = xOnBase / baseW;
-  const y = yOnBase / baseH;
-  if (x < 0 || x > 1 || y < 0 || y > 1) return;
-
-  if (flattenPoints.length >= 4) return;
-  flattenPoints.push({ x, y });
-  updateFlattenButtons();
-  drawBoundingBoxes();
+  if (activeGuideTool === 'horizontal') {
+    if (addGuideLineForCurrentPage('horizontal', point.y)) {
+      drawBoundingBoxes();
+    }
+  }
 });
 
 if (previewWrap) {
@@ -1103,7 +3232,7 @@ if (previewWrap) {
 
   previewWrap.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
-    if (flattenMode || !pageList.length) return;
+    if (flattenMode || activeGuideTool !== 'none' || !pageList.length) return;
     isPreviewPanning = true;
     panStartX = e.clientX;
     panStartY = e.clientY;
@@ -1113,15 +3242,75 @@ if (previewWrap) {
     e.preventDefault();
   });
 
-  previewWrap.addEventListener('wheel', (e) => {
-    if (flattenMode || !pageList.length || !previewImage.naturalWidth) return;
-    e.preventDefault();
-    const direction = e.deltaY < 0 ? 1 : -1;
-    stepPreviewZoom(direction * PREVIEW_ZOOM_STEP);
-  }, { passive: false });
 }
 
+window.addEventListener('mousemove', (e) => {
+  if (horizontalGuideDragState && previewRowsRuler) {
+    const key = horizontalGuideDragState.pageKey;
+    const state = getGuideStateForPage(key, true);
+    const rect = previewRowsRuler.getBoundingClientRect();
+    if (!rect.height) return;
+    const deltaRatio = (e.clientY - horizontalGuideDragState.startY) / rect.height;
+    const lines = (horizontalGuideDragState.startLines || []).slice();
+    const idx = horizontalGuideDragState.index;
+    if (idx < 0 || idx >= lines.length) return;
+    const prevLimit = idx > 0 ? lines[idx - 1] + HORIZONTAL_LINE_MIN_GAP : HORIZONTAL_LINE_MIN_GAP;
+    const nextLimit = idx < lines.length - 1 ? lines[idx + 1] - HORIZONTAL_LINE_MIN_GAP : (1 - HORIZONTAL_LINE_MIN_GAP);
+    const next = clamp(lines[idx] + deltaRatio, prevLimit, nextLimit);
+    lines[idx] = next;
+    state.horizontal = lines;
+    updateGuideSectionsInfo();
+    drawBoundingBoxes();
+    renderPreviewRowsRuler();
+    return;
+  }
+  if (!columnResizeState || !previewColumnsRuler) return;
+  const activeWidth = getPreviewColumnsRulerActiveWidth();
+  if (!activeWidth) return;
+  const deltaRatio = (e.clientX - columnResizeState.startX) / activeWidth;
+  const base = (columnResizeState.startLayout || []).map((col) => ({ ...col }));
+  setColumnLayoutForPage(columnResizeState.pageKey, base);
+  applyColumnResize(columnResizeState.pageKey, columnResizeState.index, deltaRatio, { redraw: true, invalidate: false });
+});
+
 window.addEventListener('mouseup', () => {
+  if (horizontalGuideDragState) {
+    const key = horizontalGuideDragState.pageKey;
+    const before = horizontalGuideDragState.guideBefore || cloneGuideStateSnapshot(getGuideStateForPage(key, true));
+    const after = cloneGuideStateSnapshot(getGuideStateForPage(key, true));
+    if (!guideStatesEqual(before, after)) {
+      pushGuideUndoSnapshot(key, before);
+      markHorizontalGuideTouched(key);
+      invalidateGuideDerivedData(key);
+      updateGuideSectionsInfo();
+      updateGuideToolButtons();
+      markActivePageDirty();
+      drawBoundingBoxes();
+    }
+    horizontalGuideDragState = null;
+    if (previewRowsRuler) {
+      previewRowsRuler.classList.remove('is-resizing');
+    }
+    renderPreviewRowsRuler();
+  }
+  if (columnResizeState) {
+    const key = columnResizeState.pageKey;
+    const before = columnResizeState.guideBefore || cloneGuideStateSnapshot(getGuideStateForPage(key, true));
+    const after = cloneGuideStateSnapshot(getGuideStateForPage(key, true));
+    if (!guideStatesEqual(before, after)) {
+      pushGuideUndoSnapshot(key, before);
+      invalidateGuideDerivedData(key);
+      updateGuideSectionsInfo();
+      updateGuideToolButtons();
+      markActivePageDirty();
+      drawBoundingBoxes();
+    }
+    columnResizeState = null;
+    if (previewColumnsRuler) {
+      previewColumnsRuler.classList.remove('is-resizing');
+    }
+    renderPreviewColumnsRuler();
+  }
   stopPreviewPan();
 });
 
@@ -1143,10 +3332,189 @@ if (zoomOutBtn) {
   });
 }
 
+if (addHorizontalGuideBtn) {
+  addHorizontalGuideBtn.addEventListener('click', () => {
+    if (!pageList.length) return;
+    setActiveGuideTool('horizontal');
+  });
+}
+
+if (guideUndoBtn) {
+  guideUndoBtn.addEventListener('click', () => {
+    undoGuideLinesForCurrentPage();
+  });
+}
+
+if (guideRedoBtn) {
+  guideRedoBtn.addEventListener('click', () => {
+    redoGuideLinesForCurrentPage();
+  });
+}
+
+if (clearGuideLinesBtn) {
+  clearGuideLinesBtn.addEventListener('click', () => {
+    clearGuideLinesForCurrentPage();
+  });
+}
+
+if (runSectionOcrBtn) {
+  runSectionOcrBtn.addEventListener('click', async () => {
+    await runSectionOcrForCurrentPage();
+  });
+}
+
+if (imageToolButtons.length) {
+  imageToolButtons.forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const tool = btn.dataset ? String(btn.dataset.imageTool || '').trim() : '';
+      if (!tool) return;
+      await applyImageToolForCurrentPage(tool);
+    });
+  });
+}
+
+if (previewColumnsRuler) {
+  previewColumnsRuler.addEventListener('dragstart', (e) => {
+    if (isTextOnlyToolsMode()) {
+      e.preventDefault();
+      return;
+    }
+    const item = e.target.closest('.preview-col-item');
+    if (!item || !item.dataset || !item.dataset.colKey) return;
+    if (columnResizeState) {
+      e.preventDefault();
+      return;
+    }
+    columnDragState.sourceKey = item.dataset.colKey;
+    columnDragState.targetKey = item.dataset.colKey;
+    columnSwapSelectKey = '';
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', columnDragState.sourceKey);
+    }
+    updateRulerDragClasses();
+  });
+
+  previewColumnsRuler.addEventListener('dragover', (e) => {
+    if (isTextOnlyToolsMode()) return;
+    if (!columnDragState.sourceKey) return;
+    const item = e.target.closest('.preview-col-item');
+    if (!item || !item.dataset || !item.dataset.colKey) return;
+    e.preventDefault();
+    columnDragState.targetKey = item.dataset.colKey;
+    updateRulerDragClasses();
+  });
+
+  previewColumnsRuler.addEventListener('drop', (e) => {
+    if (isTextOnlyToolsMode()) return;
+    if (!columnDragState.sourceKey) return;
+    const item = e.target.closest('.preview-col-item');
+    const pageKey = currentPageKey();
+    if (pageKey && item && item.dataset && item.dataset.colKey) {
+      reorderColumnLayout(pageKey, columnDragState.sourceKey, item.dataset.colKey);
+    }
+    columnDragState = { sourceKey: '', targetKey: '' };
+    updateRulerDragClasses();
+  });
+
+  previewColumnsRuler.addEventListener('dragend', () => {
+    columnDragState = { sourceKey: '', targetKey: '' };
+    updateRulerDragClasses();
+  });
+
+  previewColumnsRuler.addEventListener('mousedown', (e) => {
+    if (isTextOnlyToolsMode()) return;
+    const handle = e.target.closest('.preview-col-resizer');
+    if (!handle || !handle.dataset) return;
+    const pageKey = currentPageKey();
+    if (!pageKey) return;
+    const index = Number.parseInt(handle.dataset.resizeIndex || '', 10);
+    if (!Number.isFinite(index)) return;
+
+    const guideSnapshot = cloneGuideStateSnapshot(getGuideStateForPage(pageKey, true));
+    columnResizeState = {
+      pageKey,
+      index,
+      startX: e.clientX,
+      startLayout: getColumnLayoutForPage(pageKey, true).map((col) => ({ ...col })),
+      guideBefore: guideSnapshot,
+    };
+    previewColumnsRuler.classList.add('is-resizing');
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  previewColumnsRuler.addEventListener('click', (e) => {
+    if (isTextOnlyToolsMode()) return;
+    if (e.target.closest('.preview-col-resizer')) return;
+    const item = e.target.closest('.preview-col-item');
+    if (!item || !item.dataset || !item.dataset.colKey) return;
+    const pageKey = currentPageKey();
+    if (!pageKey) return;
+
+    const key = item.dataset.colKey;
+    if (!columnSwapSelectKey) {
+      columnSwapSelectKey = key;
+      updateRulerDragClasses();
+      return;
+    }
+    if (columnSwapSelectKey === key) {
+      columnSwapSelectKey = '';
+      updateRulerDragClasses();
+      return;
+    }
+    reorderColumnLayout(pageKey, columnSwapSelectKey, key);
+    columnSwapSelectKey = '';
+    updateRulerDragClasses();
+  });
+}
+
+if (previewRowsRuler) {
+  previewRowsRuler.addEventListener('mousedown', (e) => {
+    if (isTextOnlyToolsMode()) return;
+    const handle = e.target.closest('.preview-row-handle');
+    if (!handle || !handle.dataset) return;
+    const pageKey = currentPageKey();
+    if (!pageKey) return;
+    const index = Number.parseInt(handle.dataset.rowIndex || '', 10);
+    if (!Number.isFinite(index)) return;
+
+    const state = getGuideStateForPage(pageKey, true);
+    horizontalGuideDragState = {
+      pageKey,
+      index,
+      startY: e.clientY,
+      startLines: (state.horizontal || []).slice(),
+      guideBefore: cloneGuideStateSnapshot(state),
+    };
+    previewRowsRuler.classList.add('is-resizing');
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  previewRowsRuler.addEventListener('click', (e) => {
+    if (isTextOnlyToolsMode()) return;
+    if (e.target.closest('.preview-row-handle')) return;
+    if (activeGuideTool !== 'horizontal') return;
+    const pageKey = currentPageKey();
+    if (!pageKey) return;
+    const rect = previewRowsRuler.getBoundingClientRect();
+    if (!rect.height) return;
+    const y = clamp((e.clientY - rect.top) / rect.height, 0, 1);
+    if (addGuideLineForCurrentPage('horizontal', y)) {
+      drawBoundingBoxes();
+    }
+  });
+}
+
 if (flattenModeBtn) {
   flattenModeBtn.addEventListener('click', () => {
     if (!pageList.length || flattenBusy) return;
     flattenMode = !flattenMode;
+    if (flattenMode) {
+      activeGuideTool = 'none';
+      updateGuideToolButtons();
+    }
     if (flattenMode) {
       resetPreviewTransform();
     }
@@ -1353,12 +3721,17 @@ async function startProcessingFromDraft() {
 
 async function pollJobUntilDone() {
   if (!currentJobId) return;
+  resetStatusStallTracker();
 
   while (true) {
     const res = await fetchAuthed(`/jobs/${currentJobId}`);
     if (!res.ok) throw new Error('Failed to read job status');
 
     const status = await res.json();
+    if (isStatusStalled(status)) {
+      updateProgressUI(100, 'Processing appears stalled', 'failed', status.ocr_backend, status.parse_mode, status);
+      throw new Error('processing_stale_timeout');
+    }
     const step = status.step || status.status || 'processing';
     const progress = Number.isFinite(status.progress) ? status.progress : inferProgress(status.status, step);
     const currentOcrModel = status.ocr_backend || null;
@@ -1399,6 +3772,18 @@ async function loadResults() {
   boundsByPage = {};
   pageRowToGlobal = {};
   identityBoundsByPage = {};
+  guideLinesByPage = {};
+  guideHistoryByPage = {};
+  columnLayoutByPage = {};
+  columnDragState = { sourceKey: '', targetKey: '' };
+  columnResizeState = null;
+  columnSwapSelectKey = '';
+  horizontalGuideDragState = null;
+  horizontalGuideTouchedByPage = {};
+  activeGuideTool = 'none';
+  sectionOcrResultsByPage = {};
+  imageToolInFlight = false;
+  setSectionOcrBusy(false);
   parsedRows = [];
   activeRowKey = null;
   currentPageIndex = 0;
@@ -1471,6 +3856,7 @@ async function loadResults() {
   flattenMode = false;
   flattenPoints = [];
   updateFlattenButtons();
+  updateGuideToolButtons();
   renderCurrentPage();
   await loadAccountSummary();
   drawBoundingBoxes();
@@ -1521,6 +3907,7 @@ function renderRows(rows) {
     totalDebitTransactions.textContent = '0';
     totalCreditTransactions.textContent = '0';
     endingBalance.textContent = '-';
+    syncTablePanelHeightToPreview();
     return;
   }
 
@@ -1556,6 +3943,7 @@ function renderRows(rows) {
   });
 
   updateSummaryFromRows(rows);
+  syncTablePanelHeightToPreview();
 }
 
 function selectRow(rowKey) {
@@ -1580,8 +3968,9 @@ function highlightSelectedTableRow() {
 }
 
 function renderCurrentPage() {
+  renderActivePageSavedMark();
   if (!pageList.length) {
-    pageIndicator.textContent = 'Page 0 / 0';
+    pageIndicator.textContent = '0/0';
     prevPageBtn.disabled = true;
     nextPageBtn.disabled = true;
     syncPageSelect();
@@ -1591,7 +3980,11 @@ function renderCurrentPage() {
 
   const pageFile = pageList[currentPageIndex];
   const pageKey = pageFile.replace('.png', '');
-  pageIndicator.textContent = `Page ${currentPageIndex + 1} / ${pageList.length}`;
+  if (!isTextOnlyToolsMode()) {
+    ensureColumnLayoutForPage(pageKey);
+    maybeAutoSeedHorizontalGuides(pageKey, { redraw: false, invalidate: false });
+  }
+  pageIndicator.textContent = `${currentPageIndex + 1}/${pageList.length}`;
   prevPageBtn.disabled = currentPageIndex === 0;
   nextPageBtn.disabled = currentPageIndex >= pageList.length - 1;
   syncPageSelect();
@@ -1604,6 +3997,9 @@ function renderCurrentPage() {
   }
   prefetchPreviewNeighbors();
   updateFlattenButtons();
+  renderSectionOcrResultForPage(pageKey);
+  updateGuideToolButtons();
+  updatePreviewInteractionMode();
 }
 
 function maybeFocusActiveRowInPreview() {
@@ -1672,18 +4068,19 @@ function drawBoundingBoxes() {
   const baseTop = rect.top - wrapRect.top;
   const centerX = baseLeft + (rect.width / 2) + previewPanX;
   const centerY = baseTop + (rect.height / 2) + previewPanY;
-  const drawW = Math.max(1, rect.width * previewZoom);
-  const drawH = Math.max(1, rect.height * previewZoom);
-  const canvasLeft = centerX - (drawW / 2);
-  const canvasTop = centerY - (drawH / 2);
+  const drawW = Math.max(1, Math.round(rect.width * previewZoom));
+  const drawH = Math.max(1, Math.round(rect.height * previewZoom));
+  const canvasLeft = Math.round(centerX - (drawW / 2));
+  const canvasTop = Math.round(centerY - (drawH / 2));
 
   previewCanvas.width = Math.round(drawW * dpr);
   previewCanvas.height = Math.round(drawH * dpr);
-  previewCanvas.style.width = `${Math.round(drawW)}px`;
-  previewCanvas.style.height = `${Math.round(drawH)}px`;
-  previewCanvas.style.left = `${Math.round(canvasLeft)}px`;
-  previewCanvas.style.top = `${Math.round(canvasTop)}px`;
+  previewCanvas.style.width = `${drawW}px`;
+  previewCanvas.style.height = `${drawH}px`;
+  previewCanvas.style.left = `${canvasLeft}px`;
+  previewCanvas.style.top = `${canvasTop}px`;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  syncPreviewColumnsRulerGeometry(canvasLeft, drawW);
 
   ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
 
@@ -1711,6 +4108,8 @@ function drawBoundingBoxes() {
       ctx.strokeRect(x1, y1, width, height);
     }
   }
+
+  drawGuideLinesAndSections(ctx, pageKey, drawW, drawH);
 
   if (flattenMode) {
     drawFlattenOverlay(ctx);
@@ -1781,7 +4180,10 @@ function applyPreviewTransform() {
     zoomLevel.textContent = `${Math.round(previewZoom * 100)}%`;
   }
   if (previewWrap) {
-    previewWrap.classList.toggle('pannable', previewZoom > getFillPreviewZoom() + 0.001 && !flattenMode);
+    previewWrap.classList.toggle(
+      'pannable',
+      previewZoom > getFillPreviewZoom() + 0.001 && !flattenMode && activeGuideTool === 'none'
+    );
     if (!isPreviewPanning) {
       previewWrap.classList.remove('panning');
     }
@@ -1789,7 +4191,8 @@ function applyPreviewTransform() {
 }
 
 function resetPreviewTransform() {
-  previewZoom = PREVIEW_ZOOM_MIN;
+  const fillZoom = getFillPreviewZoom();
+  previewZoom = Math.max(PREVIEW_ZOOM_MIN, Math.min(PREVIEW_ZOOM_MAX, fillZoom));
   previewPanX = 0;
   previewPanY = 0;
   stopPreviewPan();
@@ -1827,7 +4230,8 @@ function getFillPreviewZoom() {
   const wrapW = previewWrap.clientWidth || 1;
   const wrapH = previewWrap.clientHeight || 1;
   if (rect.width <= 0 || rect.height <= 0) return 1;
-  const fillZoom = Math.max(wrapW / rect.width, wrapH / rect.height);
+  // Contain behavior: ensure the full page remains visible in the panel.
+  const fillZoom = Math.min(wrapW / rect.width, wrapH / rect.height);
   return Math.max(PREVIEW_ZOOM_MIN, Math.min(PREVIEW_ZOOM_MAX, fillZoom));
 }
 
@@ -1870,12 +4274,18 @@ function setPreviewEmptyState() {
   previewImage.removeAttribute('data-loaded-src');
   previewImage.removeAttribute('data-requested-src');
   previewImage.style.display = 'none';
+  clearPreviewAspectRatio();
   resetPreviewTransform();
   previewCanvas.style.left = '0px';
   previewCanvas.style.top = '0px';
-  pageIndicator.textContent = 'Page 0 / 0';
+  pageIndicator.textContent = '0/0';
   clearCanvas();
   updateFlattenButtons();
+  renderSectionOcrResultForPage('');
+  updateGuideSectionsInfo();
+  renderPreviewColumnsRuler();
+  renderPreviewRowsRuler();
+  updatePreviewInteractionMode();
 }
 
 function drawFlattenOverlay(ctx) {
@@ -1910,16 +4320,22 @@ function drawFlattenOverlay(ctx) {
 }
 
 function updateFlattenButtons() {
-  if (!flattenModeBtn || !applyFlattenBtn || !resetFlattenBtn) return;
-  flattenModeBtn.textContent = flattenMode ? 'Cancel' : 'Flatten';
-  flattenModeBtn.disabled = flattenBusy || !pageList.length;
-  applyFlattenBtn.disabled = flattenBusy || !flattenMode || flattenPoints.length !== 4;
-  resetFlattenBtn.disabled = flattenBusy || !pageList.length;
-  previewCanvas.style.pointerEvents = flattenMode && !flattenBusy ? 'auto' : 'none';
+  const textOnlyMode = isTextOnlyToolsMode();
+  if (flattenModeBtn) {
+    flattenModeBtn.textContent = flattenMode ? 'Cancel' : 'Flatten';
+    flattenModeBtn.disabled = flattenBusy || !pageList.length || textOnlyMode;
+  }
+  if (applyFlattenBtn) {
+    applyFlattenBtn.disabled = flattenBusy || !flattenMode || flattenPoints.length !== 4 || textOnlyMode;
+  }
+  if (resetFlattenBtn) {
+    resetFlattenBtn.disabled = flattenBusy || !pageList.length || textOnlyMode;
+  }
   if (flattenMode) {
     stopPreviewPan();
   }
   applyPreviewTransform();
+  updatePreviewInteractionMode();
 }
 
 async function refreshCurrentPageData(pageKey) {
@@ -1958,6 +4374,7 @@ async function refreshCurrentPageData(pageKey) {
 
   parsedRows = [...retainedOtherPages, ...refreshedRows, ...existingManualRows];
   boundsByPage[pageKey] = Array.isArray(bounds) ? bounds : [];
+  maybeAutoSeedHorizontalGuides(pageKey, { redraw: false, invalidate: false });
   rebuildPageRowMap();
   renderRows(parsedRows);
 }
@@ -1970,13 +4387,28 @@ function scrollToResults() {
   });
 }
 
-function computeAverageDailyBalance(rows) {
-  const daily = buildDailyBalances(rows);
-  if (!daily.length) return '-';
+function computeSummary(rows) {
+  return {
+    total_transactions: rows.length,
+    debit_transactions: countAmountTransactions(rows, 'debit'),
+    credit_transactions: countAmountTransactions(rows, 'credit'),
+    adb: computeAverageDailyBalanceNumber(rows),
+    monthly: computeMonthlySummary(rows).map((item) => ({
+      month: item.monthLabel,
+      debit: item.debit,
+      credit: item.credit,
+      avg_debit: item.avgDebit,
+      avg_credit: item.avgCredit,
+      adb: item.adb,
+    })),
+  };
+}
 
+function computeAverageDailyBalanceNumber(rows) {
+  const daily = buildDailyBalances(rows);
+  if (!daily.length) return null;
   let weightedTotal = 0;
   let totalDays = 0;
-
   for (let i = 0; i < daily.length; i += 1) {
     const current = daily[i];
     const nextDate = i < daily.length - 1 ? daily[i + 1].date : addDaysUTC(current.date, 1);
@@ -1984,9 +4416,14 @@ function computeAverageDailyBalance(rows) {
     weightedTotal += current.balance * days;
     totalDays += days;
   }
+  if (!totalDays) return null;
+  return weightedTotal / totalDays;
+}
 
-  if (!totalDays) return '-';
-  return formatMoney(weightedTotal / totalDays, null, null, true);
+function computeAverageDailyBalance(rows) {
+  const adb = computeAverageDailyBalanceNumber(rows);
+  if (!Number.isFinite(adb)) return '-';
+  return formatMoney(adb, null, null, true);
 }
 
 function buildDailyBalances(rows) {
@@ -2268,6 +4705,7 @@ function makeEditableCell(row, field, isAmount = false) {
 
   input.addEventListener('input', () => {
     row[field] = input.value.trim();
+    markActivePageDirty();
     updateSummaryFromRows(parsedRows);
   });
 
@@ -2291,12 +4729,14 @@ function makeEditableCell(row, field, isAmount = false) {
     const normalized = normalizeFieldValue(field, input.value);
     row[field] = normalized;
     input.value = normalized;
+    markActivePageDirty();
     updateSummaryFromRows(parsedRows);
   });
 
   input.addEventListener('change', () => {
     const normalized = normalizeFieldValue(field, input.value);
     row[field] = normalized;
+    markActivePageDirty();
     updateSummaryFromRows(parsedRows);
   });
 
@@ -2352,6 +4792,7 @@ function insertRowAfter(rowKey) {
     page_row_id: '',
   };
   parsedRows.splice(idx + 1, 0, newRow);
+  markActivePageDirty();
   rebuildPageRowMap();
   renderRows(parsedRows);
   highlightSelectedTableRow();
@@ -2362,6 +4803,7 @@ function deleteRowByKey(rowKey) {
   const idx = parsedRows.findIndex((r) => r.row_key === rowKey);
   if (idx < 0) return;
   parsedRows.splice(idx, 1);
+  markActivePageDirty();
   rebuildPageRowMap();
 
   if (!parsedRows.length) {
@@ -2456,6 +4898,9 @@ function currentPageKey() {
 }
 
 function updateSummaryFromRows(rows) {
+  if (authRole === 'credit_evaluator' && evaluatorSelectedSubmission) {
+    return;
+  }
   totalTransactions.textContent = String(rows.length);
   totalDebitTransactions.textContent = String(countAmountTransactions(rows, 'debit'));
   totalCreditTransactions.textContent = String(countAmountTransactions(rows, 'credit'));
@@ -2556,14 +5001,26 @@ function escapeHtml(value) {
 }
 
 function updateProgressUI(progress, labelText, step, ocrModel = null, parseMode = null, status = null) {
+  if (parseMode != null) {
+    setActiveParseMode(parseMode);
+  }
   const clamped = Math.max(0, Math.min(100, Math.round(progress)));
+  const statusKey = String((status && status.status) || step || '').toLowerCase();
+  const watchSig = `${statusKey}|${String(step || '')}|${clamped}`;
+  if (watchSig !== progressWatchSignature) {
+    progressWatchSignature = watchSig;
+    progressWatchUpdatedAt = Date.now();
+    progressWatchHandled = false;
+  }
+  progressWatchStatus = statusKey || progressWatchStatus;
   progressFill.style.width = `${clamped}%`;
   progressPercent.textContent = `${clamped}%`;
   progressLabel.textContent = labelText;
   progressStep.textContent = `Step: ${stepToLabel(step)}`;
   if (progressModel) {
     const modeLabel = (parseMode || 'text').toString().toUpperCase();
-    progressModel.textContent = `Mode: ${modeLabel}${modeLabel === 'OCR' ? ` | OCR Model: ${ocrModel || '-'}` : ''}`;
+    const showModel = modeLabel === 'OCR' || String(step || '').toLowerCase() === 'section_ocr';
+    progressModel.textContent = `Mode: ${modeLabel}${showModel ? ` | OCR Model: ${ocrModel || '-'}` : ''}`;
   }
   if (analyzerStatus && progressAnalyzerRow && analyzerModel && analyzerProfile && analyzerReason) {
     const modelText = status && status.profile_analyzer_model ? status.profile_analyzer_model : '-';
@@ -2580,6 +5037,46 @@ function updateProgressUI(progress, labelText, step, ocrModel = null, parseMode 
   if (progressElapsed && !elapsedStartMs) {
     progressElapsed.textContent = 'Elapsed: 00:00';
   }
+}
+
+function applyAnalyzerMetaToProgress(meta, ocrModel = 'tesseract', parseMode = 'ocr') {
+  if (!meta || typeof meta !== 'object') return;
+  const reason = String(meta.reason || '').toLowerCase();
+  const showTriggered = Boolean(meta.triggered)
+    || reason === 'matched_existing_profile'
+    || reason === 'no_ocr_profiles_sampled'
+    || reason === 'no_text_or_ocr_profiles_sampled';
+  const resultText = String(meta.result || '').trim()
+    || (reason === 'matched_existing_profile' ? 'matched' : 'skipped');
+  let label = 'Profile check completed';
+  if (reason === 'matched_existing_profile') {
+    const matched = meta.profile_name ? ` (${meta.profile_name})` : '';
+    label = `Profile matched${matched}`;
+  } else if (resultText.toLowerCase() === 'applied') {
+    label = 'AI profile created and applied';
+  } else if (resultText.toLowerCase() === 'rejected') {
+    label = 'AI profile proposal rejected by validation';
+  } else if (resultText.toLowerCase() === 'failed') {
+    label = `AI profile analyzer failed${meta.reason ? ` (${meta.reason})` : ''}`;
+  } else if (reason === 'no_ocr_profiles_sampled') {
+    label = 'No OCR text sampled for profile analysis';
+  }
+  const statusLike = {
+    profile_analyzer_triggered: showTriggered,
+    profile_analyzer_provider: meta.provider || '-',
+    profile_analyzer_model: meta.model || '-',
+    profile_analyzer_result: resultText || 'idle',
+    profile_analyzer_reason: meta.reason || '-',
+    profile_selected_after_analyzer: meta.profile_name || null,
+  };
+  updateProgressUI(
+    100,
+    label,
+    'profile_analyzer',
+    ocrModel,
+    parseMode,
+    statusLike
+  );
 }
 
 function startElapsedTimer() {
@@ -2614,12 +5111,14 @@ function renderElapsedTime() {
   if (!progressElapsed) return;
   if (!elapsedStartMs) {
     progressElapsed.textContent = 'Elapsed: 00:00';
+    checkProgressWatchdog();
     return;
   }
   const totalSecs = Math.max(0, Math.floor((Date.now() - elapsedStartMs) / 1000));
   const mins = String(Math.floor(totalSecs / 60)).padStart(2, '0');
   const secs = String(totalSecs % 60).padStart(2, '0');
   progressElapsed.textContent = `Elapsed: ${mins}:${secs}`;
+  checkProgressWatchdog();
 }
 
 function resetProgressUI() {
@@ -2659,6 +5158,7 @@ function stepToLabel(step) {
   if (key === 'account_identity_ai') return 'Extracting account identity';
   if (key === 'profile_analyzer') return 'Analyzing unknown bank structure';
   if (key === 'page_ocr') return 'Running OCR per page';
+  if (key === 'section_ocr') return 'OCR in selected sections';
   if (key === 'page_text') return 'Parsing text per page';
   if (key === 'saving_results') return 'Saving results';
   if (key === 'parsing') return 'Parsing extracted rows';
@@ -2683,6 +5183,12 @@ function formatSubmissionStatus(status) {
 }
 
 function resetResults() {
+  clearActivePageAutosaveTimer();
+  if (sectionOcrProgressTimer) {
+    clearInterval(sectionOcrProgressTimer);
+    sectionOcrProgressTimer = null;
+  }
+  sectionOcrProgressValue = 0;
   totalTransactions.textContent = '0';
   totalDebitTransactions.textContent = '0';
   totalCreditTransactions.textContent = '0';
@@ -2695,11 +5201,36 @@ function resetResults() {
   rowsByPage = {};
   boundsByPage = {};
   pageRowToGlobal = {};
+  guideLinesByPage = {};
+  guideHistoryByPage = {};
+  columnLayoutByPage = {};
+  columnDragState = { sourceKey: '', targetKey: '' };
+  columnResizeState = null;
+  columnSwapSelectKey = '';
+  horizontalGuideDragState = null;
+  horizontalGuideTouchedByPage = {};
+  activeGuideTool = 'none';
+  sectionOcrResultsByPage = {};
+  imageToolInFlight = false;
+  activeParseMode = 'text';
+  ocrToolsUnlocked = false;
+  setSectionOcrBusy(false);
   activeRowKey = null;
   currentPageIndex = 0;
   rowKeyCounter = 1;
   pageImageVersion = {};
   clearPreviewBlobCache();
+  evaluatorManifest = [];
+  evaluatorReviewProgress = { total_pages: 0, parsed_pages: 0, reviewed_pages: 0, percent: 0 };
+  evaluatorCanExport = false;
+  activePageKey = '';
+  activePageReviewStatus = 'pending';
+  activePageUpdatedAt = null;
+  activePageDirty = false;
+  activePageSaveInFlight = false;
+  activePageSavePromise = null;
+  clearEvaluatorManifestTimer();
+  renderActivePageSavedMark();
   flattenMode = false;
   flattenPoints = [];
   flattenBusy = false;
@@ -2709,7 +5240,9 @@ function resetResults() {
   shouldAutoScrollToResults = false;
   hasSeenInFlightStatus = false;
   updateSummaryFromRows([]);
+  setSummaryLocked(authRole === 'credit_evaluator');
   updateFlattenButtons();
+  updateGuideToolButtons();
   renderCurrentPage();
 }
 
@@ -2753,6 +5286,7 @@ async function loadPreviewImageForPage(pageKey) {
   const src = buildPreviewSrc(pageKey);
   if (previewImage.dataset.loadedSrc === src && previewImage.src) {
     previewImage.style.display = 'block';
+    setPreviewAspectRatioFromImage();
     drawBoundingBoxes();
     applyPreviewTransform();
     return;
@@ -2818,8 +5352,72 @@ async function markSummaryGenerated() {
   await loadEvaluatorSubmissions();
 }
 
+async function getEvaluatorExportPayload() {
+  if (!(authRole === 'credit_evaluator' && evaluatorSelectedSubmission && evaluatorSelectedSubmission.id)) {
+    return null;
+  }
+  const submissionId = evaluatorSelectedSubmission.id;
+  const reviewRes = await fetchAuthed(`/evaluator/submissions/${submissionId}/review-status`);
+  const reviewBody = await safeParseJson(reviewRes);
+  if (!reviewRes.ok) {
+    throw new Error((reviewBody && reviewBody.detail) || 'Failed to check review status');
+  }
+  if (!reviewBody.can_export) {
+    throw new Error('Review all pages to enable export.');
+  }
+
+  const manifestRes = await fetchAuthed(`/evaluator/submissions/${submissionId}/pages`);
+  const manifestBody = await safeParseJson(manifestRes);
+  if (!manifestRes.ok) {
+    throw new Error((manifestBody && manifestBody.detail) || 'Failed to load page manifest');
+  }
+  const pages = Array.isArray(manifestBody.pages) ? manifestBody.pages : [];
+  const allRows = [];
+  for (const page of pages) {
+    const pageKey = page && page.page_key ? page.page_key : '';
+    if (!pageKey) continue;
+    const pageRes = await fetchAuthed(`/evaluator/submissions/${submissionId}/pages/${pageKey}`);
+    const pageBody = await safeParseJson(pageRes);
+    if (!pageRes.ok) continue;
+    const rows = Array.isArray(pageBody.rows) ? pageBody.rows : [];
+    rows.forEach((row, idx) => {
+      allRows.push({
+        row_key: createRowKey(),
+        global_row_id: String(row.row_id || idx + 1).padStart(3, '0'),
+        row_id: String(row.row_id || idx + 1).padStart(3, '0'),
+        date: row.date || '',
+        description: row.description || '',
+        debit: row.debit != null ? String(row.debit) : '',
+        credit: row.credit != null ? String(row.credit) : '',
+        balance: row.balance != null ? String(row.balance) : '',
+        page: pageKey,
+        page_row_id: String(row.row_id || idx + 1).padStart(3, '0'),
+      });
+    });
+  }
+
+  const subRes = await fetchAuthed(`/evaluator/submissions/${submissionId}`);
+  const subBody = await safeParseJson(subRes);
+  const summary = subRes.ok && subBody ? (subBody.summary || null) : null;
+  return { rows: allRows, summary };
+}
+
 async function exportToPdf() {
-  if (!parsedRows.length) {
+  let rowsForExport = parsedRows.slice();
+  let summaryForExport = null;
+
+  if (authRole === 'credit_evaluator' && evaluatorSelectedSubmission && evaluatorSelectedSubmission.id) {
+    try {
+      const payload = await getEvaluatorExportPayload();
+      rowsForExport = payload && Array.isArray(payload.rows) ? payload.rows : [];
+      summaryForExport = payload ? payload.summary : null;
+    } catch (err) {
+      alert((err && err.message) || 'Export blocked');
+      return;
+    }
+  }
+
+  if (!rowsForExport.length) {
     alert('No extracted rows to export yet.');
     return;
   }
@@ -2853,13 +5451,14 @@ async function exportToPdf() {
   );
   y += 14;
 
+  const computedSummary = summaryForExport || computeSummary(rowsForExport);
   const summaryRows = [
     ['Account Name', pdfSafeText((accountNameSummary && accountNameSummary.textContent ? accountNameSummary.textContent : '-').trim())],
     ['Account Number', pdfSafeText((accountNumberSummary && accountNumberSummary.textContent ? accountNumberSummary.textContent : '-').trim())],
-    ['Total Transactions', pdfSafeText((totalTransactions && totalTransactions.textContent ? totalTransactions.textContent : '0').trim())],
-    ['Debit Transactions', pdfSafeText((totalDebitTransactions && totalDebitTransactions.textContent ? totalDebitTransactions.textContent : '0').trim())],
-    ['Credit Transactions', pdfSafeText((totalCreditTransactions && totalCreditTransactions.textContent ? totalCreditTransactions.textContent : '0').trim())],
-    ['Average Daily Balance (ADB)', formatPdfMoneyPlain(endingBalance && endingBalance.textContent ? endingBalance.textContent : '-')]
+    ['Total Transactions', pdfSafeText(String(computedSummary.total_transactions || rowsForExport.length))],
+    ['Debit Transactions', pdfSafeText(String(computedSummary.debit_transactions || countAmountTransactions(rowsForExport, 'debit')))],
+    ['Credit Transactions', pdfSafeText(String(computedSummary.credit_transactions || countAmountTransactions(rowsForExport, 'credit')))],
+    ['Average Daily Balance (ADB)', formatPdfMoneyPlain(computedSummary.adb)]
   ];
 
   if (typeof doc.autoTable === 'function') {
@@ -2882,7 +5481,16 @@ async function exportToPdf() {
     y += 8;
   }
 
-  const monthly = computeMonthlySummary(parsedRows);
+  const monthly = Array.isArray(computedSummary.monthly) && computedSummary.monthly.length
+    ? computedSummary.monthly.map((item) => ({
+      monthLabel: item.month || item.monthLabel,
+      debit: Number(item.debit || 0),
+      credit: Number(item.credit || 0),
+      avgDebit: Number(item.avg_debit || item.avgDebit || 0),
+      avgCredit: Number(item.avg_credit || item.avgCredit || 0),
+      adb: Number(item.adb || 0),
+    }))
+    : computeMonthlySummary(rowsForExport);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(11);
   doc.text('Monthly Summary', marginLeft, y);
@@ -2931,7 +5539,7 @@ async function exportToPdf() {
   doc.text('Transactions', marginLeft, y);
   y += 10;
 
-  const tableRows = parsedRows.map((row, idx) => ([
+  const tableRows = rowsForExport.map((row, idx) => ([
     String(row.global_row_id || row.row_id || idx + 1),
     pdfSafeText(getDisplayValue(row, 'date') || ''),
     pdfSafeText(getDisplayValue(row, 'description') || ''),
@@ -2983,7 +5591,20 @@ async function exportToPdf() {
 }
 
 async function exportToExcel() {
-  if (!parsedRows.length) {
+  let rowsForExport = parsedRows.slice();
+  let summaryForExport = null;
+  if (authRole === 'credit_evaluator' && evaluatorSelectedSubmission && evaluatorSelectedSubmission.id) {
+    try {
+      const payload = await getEvaluatorExportPayload();
+      rowsForExport = payload && Array.isArray(payload.rows) ? payload.rows : [];
+      summaryForExport = payload ? payload.summary : null;
+    } catch (err) {
+      alert((err && err.message) || 'Export blocked');
+      return;
+    }
+  }
+
+  if (!rowsForExport.length) {
     alert('No extracted rows to export yet.');
     return;
   }
@@ -2994,13 +5615,14 @@ async function exportToExcel() {
 
   const workbook = window.XLSX.utils.book_new();
 
+  const computedSummary = summaryForExport || computeSummary(rowsForExport);
   const summaryRows = [
     ['Account Name', (accountNameSummary && accountNameSummary.textContent ? accountNameSummary.textContent : '-').trim()],
     ['Account Number', (accountNumberSummary && accountNumberSummary.textContent ? accountNumberSummary.textContent : '-').trim()],
-    ['Total Transactions', (totalTransactions && totalTransactions.textContent ? totalTransactions.textContent : '0').trim()],
-    ['Debit Transactions', (totalDebitTransactions && totalDebitTransactions.textContent ? totalDebitTransactions.textContent : '0').trim()],
-    ['Credit Transactions', (totalCreditTransactions && totalCreditTransactions.textContent ? totalCreditTransactions.textContent : '0').trim()],
-    ['Average Daily Balance (ADB)', (endingBalance && endingBalance.textContent ? endingBalance.textContent : '-').trim()],
+    ['Total Transactions', String(computedSummary.total_transactions || rowsForExport.length)],
+    ['Debit Transactions', String(computedSummary.debit_transactions || countAmountTransactions(rowsForExport, 'debit'))],
+    ['Credit Transactions', String(computedSummary.credit_transactions || countAmountTransactions(rowsForExport, 'credit'))],
+    ['Average Daily Balance (ADB)', formatPesoValue(Number(computedSummary.adb || 0), true)],
   ];
   const summarySheet = window.XLSX.utils.aoa_to_sheet([
     ['Account Summary', ''],
@@ -3008,7 +5630,16 @@ async function exportToExcel() {
   ]);
   window.XLSX.utils.book_append_sheet(workbook, summarySheet, 'Summary');
 
-  const monthly = computeMonthlySummary(parsedRows);
+  const monthly = Array.isArray(computedSummary.monthly) && computedSummary.monthly.length
+    ? computedSummary.monthly.map((item) => ({
+      monthLabel: item.month || item.monthLabel,
+      debit: Number(item.debit || 0),
+      credit: Number(item.credit || 0),
+      avgDebit: Number(item.avg_debit || item.avgDebit || 0),
+      avgCredit: Number(item.avg_credit || item.avgCredit || 0),
+      adb: Number(item.adb || 0),
+    }))
+    : computeMonthlySummary(rowsForExport);
   const monthlyRows = monthly.length
     ? monthly.map((item) => ([
       item.monthLabel,
@@ -3025,7 +5656,7 @@ async function exportToExcel() {
   ]);
   window.XLSX.utils.book_append_sheet(workbook, monthlySheet, 'Monthly Summary');
 
-  const txRows = parsedRows.map((row, idx) => ([
+  const txRows = rowsForExport.map((row, idx) => ([
     String(row.global_row_id || row.row_id || idx + 1),
     getDisplayValue(row, 'date') || '',
     getDisplayValue(row, 'description') || '',
