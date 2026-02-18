@@ -44,6 +44,7 @@ from app.workflow_models import User, Submission, SubmissionPage, JobRecord, Tra
 from app.workflow_service import (
     assign_submission_to_evaluator,
     can_generate_exports,
+    combine_submissions_for_evaluator,
     compute_summary,
     finish_review_and_build_summary,
     create_report_record,
@@ -59,6 +60,7 @@ from app.workflow_service import (
     mark_page_reviewed,
     persist_page_transactions,
     persist_evaluator_transactions,
+    normalize_borrower_name,
     serialize_submission,
     serialize_transaction,
     set_page_parse_status,
@@ -994,6 +996,10 @@ class EvaluatorPageTransactionsPatch(BaseModel):
     guide_state: Optional[EvaluatorGuideState] = None
 
 
+class EvaluatorCombineSubmissionsPayload(BaseModel):
+    submission_ids: List[uuid.UUID] = Field(default_factory=list)
+
+
 @app.post("/agent/submissions")
 async def agent_create_submission(
     file: UploadFile = File(...),
@@ -1005,6 +1011,8 @@ async def agent_create_submission(
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="PDF only")
+    if not normalize_borrower_name(borrower_name):
+        raise HTTPException(status_code=422, detail="borrower_required")
     parse_mode = _normalize_parse_mode(mode)
     job_id = uuid.uuid4()
     blob_key = f"jobs/{job_id}/input/document.pdf"
@@ -1095,6 +1103,50 @@ def evaluator_assign_submission(submission_id: uuid.UUID, user: AuthUser = Depen
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     return serialize_submission(sub)
+
+
+@app.post("/evaluator/submissions/combine")
+def evaluator_combine_submissions(
+    payload: EvaluatorCombineSubmissionsPayload,
+    user: AuthUser = Depends(require_role("credit_evaluator")),
+):
+    try:
+        sub, job = combine_submissions_for_evaluator(user, payload.submission_ids)
+    except ValueError as exc:
+        detail = str(exc)
+        code = 400
+        if detail == "submission_not_found":
+            code = 404
+        raise HTTPException(status_code=code, detail=detail)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    job_dir = os.path.join(DATA_DIR, "jobs", str(job.id))
+    os.makedirs(os.path.join(job_dir, "input"), exist_ok=True)
+    status_path = os.path.join(job_dir, "status.json")
+    with open(status_path, "w") as f:
+        json.dump(
+            {
+                "status": "for_review",
+                "step": "for_review",
+                "progress": 0,
+                "parse_mode": str(job.parse_mode or "text"),
+            },
+            f,
+        )
+    try:
+        with open(os.path.join(job_dir, "meta.json"), "w") as f:
+            json.dump(
+                {
+                    "original_filename": "combined.pdf",
+                    "source_submission_ids": [str(sid) for sid in payload.submission_ids],
+                },
+                f,
+            )
+    except Exception as exc:
+        logger.warning("Failed to write combine meta.json for job %s", str(job.id), exc_info=exc)
+
+    return {"submission_id": str(sub.id), "job_id": str(job.id), "status": sub.status}
 
 
 @app.get("/evaluator/submissions/{submission_id}")
@@ -1309,8 +1361,8 @@ def evaluator_patch_page_transactions(
     if payload.expected_updated_at:
         try:
             page_data = get_submission_page(submission_id, key, user)
-            saved_at = str((page_data.get("page_status") or {}).get("saved_at") or "")
-            if saved_at and saved_at != payload.expected_updated_at:
+            updated_at = str((page_data.get("page_status") or {}).get("updated_at") or "")
+            if updated_at and updated_at != payload.expected_updated_at:
                 raise HTTPException(status_code=409, detail="page_conflict_reload")
         except ValueError as exc:
             if str(exc) != "page_not_found":
@@ -1554,16 +1606,20 @@ def job_status(job_id: uuid.UUID, user: AuthUser = Depends(get_current_user)):
     _authorize_job_access(job, user, write=False)
     job_id_str = str(job_id)
     status_path = os.path.join(DATA_DIR, "jobs", job_id_str, "status.json")
+    job_status_value = str(getattr(job, "status", None) or "queued")
+    job_step_value = str(getattr(job, "step", None) or job_status_value or "queued")
 
     db_payload = {
-        "status": str(job.status or "queued"),
-        "step": str(job.step or job.status or "queued"),
-        "progress": max(0, min(100, _coerce_progress(job.progress, 0))),
+        "status": job_status_value,
+        "step": job_step_value,
+        "progress": max(0, min(100, _coerce_progress(getattr(job, "progress", 0), 0))),
     }
-    if job.parse_mode:
-        db_payload["parse_mode"] = job.parse_mode
-    if job.ocr_backend:
-        db_payload["ocr_backend"] = job.ocr_backend
+    job_parse_mode = getattr(job, "parse_mode", None)
+    if job_parse_mode:
+        db_payload["parse_mode"] = job_parse_mode
+    job_ocr_backend = getattr(job, "ocr_backend", None)
+    if job_ocr_backend:
+        db_payload["ocr_backend"] = job_ocr_backend
 
     if not os.path.exists(status_path):
         return db_payload

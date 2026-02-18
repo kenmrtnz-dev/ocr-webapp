@@ -53,6 +53,7 @@ def test_evaluator_pages_manifest_endpoint_ok(client_factory, monkeypatch):
 def test_page_save_conflict_returns_409(client_factory, monkeypatch):
     user_id = uuid.uuid4()
     submission_id = uuid.uuid4()
+    monkeypatch.setattr(main, "get_submission_for_user", lambda *_args, **_kwargs: _submission(submission_id, user_id))
 
     monkeypatch.setattr(
         main,

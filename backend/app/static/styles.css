@@ -738,19 +738,21 @@ body[data-page-role="admin"] .admin-danger-btn.preview-nav {
 .agent-submissions-grid-agent td:nth-child(5) { width: 24%; }
 
 .agent-submissions-grid-evaluator th:nth-child(1),
-.agent-submissions-grid-evaluator td:nth-child(1) { width: 9%; }
+.agent-submissions-grid-evaluator td:nth-child(1) { width: 6%; }
 .agent-submissions-grid-evaluator th:nth-child(2),
-.agent-submissions-grid-evaluator td:nth-child(2) { width: 14%; }
+.agent-submissions-grid-evaluator td:nth-child(2) { width: 12%; }
 .agent-submissions-grid-evaluator th:nth-child(3),
-.agent-submissions-grid-evaluator td:nth-child(3) { width: 16%; }
+.agent-submissions-grid-evaluator td:nth-child(3) { width: 14%; }
 .agent-submissions-grid-evaluator th:nth-child(4),
-.agent-submissions-grid-evaluator td:nth-child(4) { width: 13%; }
+.agent-submissions-grid-evaluator td:nth-child(4) { width: 15%; }
 .agent-submissions-grid-evaluator th:nth-child(5),
-.agent-submissions-grid-evaluator td:nth-child(5) { width: 20%; }
+.agent-submissions-grid-evaluator td:nth-child(5) { width: 12%; }
 .agent-submissions-grid-evaluator th:nth-child(6),
-.agent-submissions-grid-evaluator td:nth-child(6) { width: 10%; }
+.agent-submissions-grid-evaluator td:nth-child(6) { width: 19%; }
 .agent-submissions-grid-evaluator th:nth-child(7),
-.agent-submissions-grid-evaluator td:nth-child(7) { width: 18%; }
+.agent-submissions-grid-evaluator td:nth-child(7) { width: 9%; }
+.agent-submissions-grid-evaluator th:nth-child(8),
+.agent-submissions-grid-evaluator td:nth-child(8) { width: 13%; }
 
 .agent-submissions-table thead th {
     text-align: left;
@@ -808,6 +810,12 @@ body[data-page-role="admin"] .admin-danger-btn.preview-nav {
     white-space: nowrap;
 }
 
+.agent-submissions-grid-evaluator td:nth-child(8) {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: nowrap;
+}
+
 .agent-submissions-grid-agent td:nth-child(5) {
     overflow: visible;
     text-overflow: clip;
@@ -815,6 +823,10 @@ body[data-page-role="admin"] .admin-danger-btn.preview-nav {
 }
 
 .agent-submissions-grid-evaluator td.workflow-item-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    justify-content: flex-start;
     overflow: visible;
     text-overflow: clip;
     white-space: nowrap;

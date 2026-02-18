@@ -24,7 +24,7 @@
                     <h3>Agent Workflow</h3>
                 </div>
                 <div class="workflow-actions agent-upload-fields">
-                    <input type="text" id="agentBorrowerName" placeholder="Borrower name">
+                    <input type="text" id="agentBorrowerName" placeholder="Borrower name *" required>
                     <input type="text" id="agentLeadReference" placeholder="Lead reference">
                 </div>
                 <div class="agent-upload-card">
@@ -44,7 +44,7 @@
                     </div>
                 </div>
                 <div class="agent-upload-submit-row">
-                    <button id="agentSubmitBtn" class="preview-nav agent-submit-btn">Submit Files</button>
+                    <button id="agentSubmitBtn" class="preview-nav agent-submit-btn" disabled>Submit Files</button>
                     <div id="agentUploadProgressWrap" class="agent-upload-progress-wrap is-hidden" aria-live="polite">
                         <div class="agent-upload-progress-meta">
                             <span id="agentUploadProgressLabel">Uploading...</span>

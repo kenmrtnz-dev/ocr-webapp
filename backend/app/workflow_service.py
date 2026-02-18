@@ -1,4 +1,5 @@
 import datetime as dt
+import io
 import json
 import os
 import uuid
@@ -8,6 +9,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.auth_service import AuthUser
+from app.blob_store import blob_abs_path, write_blob
 from app.db import SessionLocal
 from app.workflow_models import AuditLog, JobRecord, Report, Submission, SubmissionPage, Transaction, User
 
@@ -15,6 +17,18 @@ from app.workflow_models import AuditLog, JobRecord, Report, Submission, Submiss
 ALLOWED_STATES = {"for_review", "processing", "summary_generated", "failed"}
 PARSE_STATUS_VALUES = {"pending", "processing", "done", "failed"}
 REVIEW_STATUS_VALUES = {"pending", "in_review", "saved", "reviewed"}
+
+
+def normalize_borrower_name(value: Optional[str]) -> Optional[str]:
+    raw = " ".join(str(value or "").strip().split())
+    if not raw:
+        return None
+    return raw.title()
+
+
+def _normalized_borrower_key(value: Optional[str]) -> str:
+    normalized = normalize_borrower_name(value)
+    return normalized.casefold() if normalized else ""
 
 
 def _to_float(value) -> Optional[float]:
@@ -221,10 +235,11 @@ def create_submission_with_job(
 ) -> Tuple[Submission, JobRecord]:
     db = SessionLocal()
     try:
+        normalized_borrower = normalize_borrower_name(borrower_name)
         sub = Submission(
             agent_id=agent_user.id,
             status="for_review",
-            borrower_name=borrower_name,
+            borrower_name=normalized_borrower,
             lead_reference=lead_reference,
             notes=notes,
             input_pdf_key=input_pdf_key,
@@ -254,6 +269,121 @@ def create_submission_with_job(
         db.refresh(sub)
         db.refresh(job)
         return sub, job
+    finally:
+        db.close()
+
+
+def _merge_pdf_blob_keys(blob_keys: List[str]) -> bytes:
+    from pypdf import PdfReader, PdfWriter
+
+    writer = PdfWriter()
+    for key in blob_keys:
+        abs_path = blob_abs_path(key)
+        if not os.path.exists(abs_path):
+            raise ValueError("source_pdf_not_found")
+        reader = PdfReader(abs_path)
+        for page in reader.pages:
+            writer.add_page(page)
+    if not writer.pages:
+        raise ValueError("source_pdf_not_found")
+
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+def combine_submissions_for_evaluator(
+    evaluator_user: AuthUser,
+    submission_ids: List[uuid.UUID],
+) -> Tuple[Submission, JobRecord]:
+    unique_ids: List[uuid.UUID] = []
+    seen: set[uuid.UUID] = set()
+    for raw_id in submission_ids or []:
+        sid = raw_id if isinstance(raw_id, uuid.UUID) else uuid.UUID(str(raw_id))
+        if sid in seen:
+            continue
+        seen.add(sid)
+        unique_ids.append(sid)
+    if len(unique_ids) < 2:
+        raise ValueError("at_least_two_submissions_required")
+
+    db = SessionLocal()
+    try:
+        rows = list(db.scalars(select(Submission).where(Submission.id.in_(unique_ids))))
+        by_id = {row.id: row for row in rows}
+
+        source_submissions: List[Submission] = []
+        for sid in unique_ids:
+            sub = by_id.get(sid)
+            if not sub:
+                raise ValueError("submission_not_found")
+            if sub.assigned_evaluator_id not in {None, evaluator_user.id}:
+                raise PermissionError("forbidden_submission")
+            source_submissions.append(sub)
+
+        borrower_keys = {_normalized_borrower_key(sub.borrower_name) for sub in source_submissions}
+        if "" in borrower_keys or len(borrower_keys) != 1:
+            raise ValueError("borrower_name_mismatch")
+        normalized_borrower = normalize_borrower_name(source_submissions[0].borrower_name)
+        if not normalized_borrower:
+            raise ValueError("borrower_name_mismatch")
+
+        parse_mode = "text"
+        first_job_id = source_submissions[0].current_job_id
+        if first_job_id:
+            first_job = db.scalar(select(JobRecord).where(JobRecord.id == first_job_id))
+            if first_job and first_job.parse_mode:
+                parse_mode = str(first_job.parse_mode)
+
+        new_job_id = uuid.uuid4()
+        new_blob_key = f"jobs/{new_job_id}/input/document.pdf"
+        merged_pdf = _merge_pdf_blob_keys([sub.input_pdf_key for sub in source_submissions])
+        write_blob(new_blob_key, merged_pdf)
+
+        new_submission_id = uuid.uuid4()
+        new_submission = Submission(
+            id=new_submission_id,
+            agent_id=source_submissions[0].agent_id,
+            assigned_evaluator_id=evaluator_user.id,
+            status="for_review",
+            borrower_name=normalized_borrower,
+            lead_reference=source_submissions[0].lead_reference,
+            notes=source_submissions[0].notes,
+            input_pdf_key=new_blob_key,
+            current_job_id=new_job_id,
+        )
+        new_job = JobRecord(
+            id=new_job_id,
+            submission_id=new_submission_id,
+            status="for_review",
+            step="queued",
+            progress=0,
+            parse_mode=parse_mode,
+        )
+
+        try:
+            # Persist parent rows first so FK references from audit_log are always valid.
+            db.add(new_submission)
+            db.flush()
+            db.add(new_job)
+            db.flush()
+            db.add(
+                AuditLog(
+                    actor_user_id=evaluator_user.id,
+                    submission_id=new_submission_id,
+                    action="submission_combined",
+                    before_json={"source_submission_ids": [str(s.id) for s in source_submissions]},
+                    after_json={"job_id": str(new_job_id), "status": "for_review"},
+                )
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+        db.refresh(new_submission)
+        db.refresh(new_job)
+        return new_submission, new_job
     finally:
         db.close()
 
@@ -1074,12 +1204,72 @@ def persist_evaluator_transactions(
     evaluator_user: AuthUser,
     rows: List[Dict],
 ) -> Dict:
-    grouped: Dict[str, List[Dict]] = {}
-    for row in rows:
-        key = _normalize_page_key(str(row.get("page") or ""))
-        if not key:
-            continue
-        grouped.setdefault(key, []).append(row)
+    db = SessionLocal()
+    try:
+        sub = db.scalar(select(Submission).where(Submission.id == submission_id))
+        if not sub:
+            raise ValueError("submission_not_found")
+        if sub.assigned_evaluator_id != evaluator_user.id:
+            raise PermissionError("forbidden_submission")
+        if sub.status == "failed":
+            raise ValueError("submission_failed")
+
+        grouped: Dict[str, List[Dict]] = {}
+        missing_page_rows: List[Dict] = []
+        for row in rows:
+            key = _normalize_page_key(str(row.get("page") or ""))
+            if not key:
+                missing_page_rows.append(row)
+                continue
+            grouped.setdefault(key, []).append(row)
+
+        if missing_page_rows:
+            submission_page_keys = sorted(
+                {
+                    _normalize_page_key(p.page_key)
+                    for p in db.scalars(
+                        select(SubmissionPage).where(SubmissionPage.submission_id == submission_id)
+                    )
+                    if _normalize_page_key(p.page_key)
+                },
+                key=_page_index_from_key,
+            )
+            transaction_page_keys = sorted(
+                {
+                    _normalize_page_key(p)
+                    for p in db.scalars(
+                        select(Transaction.page).where(
+                            Transaction.submission_id == submission_id,
+                            Transaction.page.is_not(None),
+                        )
+                    )
+                    if _normalize_page_key(p)
+                },
+                key=_page_index_from_key,
+            )
+            payload_page_keys = sorted(grouped.keys(), key=_page_index_from_key)
+
+            target_page: Optional[str] = None
+            if len(submission_page_keys) == 1:
+                target_page = submission_page_keys[0]
+            elif len(submission_page_keys) > 1:
+                raise ValueError("missing_page_for_multi_page_payload")
+            elif len(transaction_page_keys) == 1:
+                target_page = transaction_page_keys[0]
+            elif len(transaction_page_keys) > 1:
+                raise ValueError("missing_page_for_multi_page_payload")
+            elif len(payload_page_keys) == 1:
+                target_page = payload_page_keys[0]
+            elif len(payload_page_keys) > 1:
+                raise ValueError("missing_page_for_multi_page_payload")
+            else:
+                target_page = "page_001"
+
+            grouped.setdefault(target_page, []).extend(
+                [{**row, "page": target_page} for row in missing_page_rows]
+            )
+    finally:
+        db.close()
 
     # Backward-compatible behavior: rewrite pages, then return summary.
     summary = {}

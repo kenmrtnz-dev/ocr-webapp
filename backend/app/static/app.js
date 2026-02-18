@@ -87,6 +87,7 @@ const agentRefreshBtn = document.getElementById('agentRefreshBtn');
 const agentSubmissionList = document.getElementById('agentSubmissionList');
 const evaluatorRefreshBtn = document.getElementById('evaluatorRefreshBtn');
 const evaluatorSearchInput = document.getElementById('evaluatorSearchInput');
+const evaluatorCombineBtn = document.getElementById('evaluatorCombineBtn');
 const evaluatorSubmissionList = document.getElementById('evaluatorSubmissionList');
 const evaluatorActionBar = document.getElementById('evaluatorActionBar');
 const evaluatorStartBtn = document.getElementById('evaluatorStartBtn');
@@ -155,6 +156,8 @@ const AGENT_SUBMISSIONS_PAGE_SIZE = 15;
 let evaluatorSubmissionsCache = [];
 let evaluatorSubmissionsPage = 1;
 const EVALUATOR_SUBMISSIONS_PAGE_SIZE = 15;
+let evaluatorSelectedSubmissionIds = new Set();
+let evaluatorCombineInFlight = false;
 let authRedirectInProgress = false;
 let statusStallSignature = '';
 let statusStallCount = 0;
@@ -1874,6 +1877,74 @@ function getSubmissionFilename(item) {
   return parts.length ? parts[parts.length - 1] : key;
 }
 
+function normalizeBorrowerNameForCompare(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function pruneSelectedEvaluatorSubmissionIds() {
+  const validIds = new Set((evaluatorSubmissionsCache || []).map((item) => String(item.id || '')));
+  evaluatorSelectedSubmissionIds.forEach((id) => {
+    if (!validIds.has(id)) {
+      evaluatorSelectedSubmissionIds.delete(id);
+    }
+  });
+}
+
+function updateEvaluatorCombineButtonState() {
+  if (!evaluatorCombineBtn) return;
+  const count = evaluatorSelectedSubmissionIds.size;
+  evaluatorCombineBtn.disabled = evaluatorCombineInFlight || count < 2;
+  evaluatorCombineBtn.textContent = count > 0 ? `Combine Selected (${count})` : 'Combine Selected';
+}
+
+function getSelectedEvaluatorSubmissionItems() {
+  if (!evaluatorSelectedSubmissionIds.size) return [];
+  const mapById = new Map((evaluatorSubmissionsCache || []).map((item) => [String(item.id || ''), item]));
+  return Array.from(evaluatorSelectedSubmissionIds)
+    .map((id) => mapById.get(String(id)))
+    .filter(Boolean);
+}
+
+async function combineSelectedEvaluatorSubmissions() {
+  const selectedItems = getSelectedEvaluatorSubmissionItems();
+  if (selectedItems.length < 2) {
+    alert('Select at least two submissions to combine.');
+    return;
+  }
+  const borrowerKeys = selectedItems.map((item) => normalizeBorrowerNameForCompare(item.borrower_name));
+  if (borrowerKeys.some((key) => !key) || borrowerKeys.some((key) => key !== borrowerKeys[0])) {
+    alert('Combine only supports submissions with the same borrower name.');
+    return;
+  }
+
+  evaluatorCombineInFlight = true;
+  updateEvaluatorCombineButtonState();
+  try {
+    const selectedIds = selectedItems.map((item) => String(item.id));
+    const res = await fetchAuthed('/evaluator/submissions/combine', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ submission_ids: selectedIds }),
+    });
+    const body = await safeParseJson(res);
+    if (!res.ok) {
+      alert((body && body.detail) || 'Failed to combine submissions');
+      return;
+    }
+    evaluatorSelectedSubmissionIds = new Set();
+    updateEvaluatorCombineButtonState();
+    await loadEvaluatorSubmissions();
+    if (body && body.submission_id) {
+      alert(`Combined successfully. New submission: ${body.submission_id}`);
+    } else {
+      alert('Combined successfully.');
+    }
+  } finally {
+    evaluatorCombineInFlight = false;
+    updateEvaluatorCombineButtonState();
+  }
+}
+
 function renderAgentSubmissionTable(items) {
   if (!items.length) {
     return '<div class="table-empty">No submissions yet</div>';
@@ -1973,7 +2044,9 @@ function renderEvaluatorSubmissionTable(items) {
     const assignBtn = item.assigned_evaluator_id ? '' : `<button class="preview-nav workflow-mini-btn" data-action="assign" data-id="${item.id}">Assign</button>`;
     const openBtn = item.assigned_evaluator_id ? `<button class="preview-nav workflow-mini-btn" data-action="open" data-id="${item.id}">Open</button>` : '';
     const agentLabel = item.agent_email || item.agent_id || '-';
+    const checked = evaluatorSelectedSubmissionIds.has(String(item.id || '')) ? ' checked' : '';
     return `<tr>
+      <td><input type="checkbox" class="evaluator-select-checkbox" data-submission-id="${escapeHtml(String(item.id || ''))}"${checked}></td>
       <td>${escapeHtml(formatAgentSubmissionDate(item.created_at))}</td>
       <td title="${escapeHtml(agentLabel)}">${escapeHtml(agentLabel)}</td>
       <td>${escapeHtml(item.borrower_name || '-')}</td>
@@ -1985,7 +2058,7 @@ function renderEvaluatorSubmissionTable(items) {
   });
   const fillerCount = Math.max(0, EVALUATOR_SUBMISSIONS_PAGE_SIZE - pageItems.length);
   for (let i = 0; i < fillerCount; i += 1) {
-    rowHtml.push('<tr class="agent-row-filler"><td colspan="7"></td></tr>');
+    rowHtml.push('<tr class="agent-row-filler"><td colspan="8"></td></tr>');
   }
   const rows = rowHtml.join('');
 
@@ -1999,6 +2072,7 @@ function renderEvaluatorSubmissionTable(items) {
     <table class="agent-submissions-grid agent-submissions-grid-evaluator">
       <thead>
         <tr>
+          <th>Select</th>
           <th>Date</th>
           <th>Agent</th>
           <th>Borrower Name</th>
@@ -2022,6 +2096,7 @@ function renderEvaluatorSubmissionTableFiltered() {
   const query = (evaluatorSearchInput && evaluatorSearchInput.value || '').trim().toLowerCase();
   if (!query) {
     evaluatorSubmissionList.innerHTML = renderEvaluatorSubmissionTable(evaluatorSubmissionsCache);
+    updateEvaluatorCombineButtonState();
     return;
   }
   const filtered = evaluatorSubmissionsCache.filter((item) => {
@@ -2029,6 +2104,7 @@ function renderEvaluatorSubmissionTableFiltered() {
     return borrower.includes(query);
   });
   evaluatorSubmissionList.innerHTML = renderEvaluatorSubmissionTable(filtered);
+  updateEvaluatorCombineButtonState();
 }
 
 async function loadAgentSubmissions() {
@@ -2051,7 +2127,8 @@ function updateAgentSubmitButtonState() {
   if (!agentSubmitBtn) return;
   if (isAgentSubmitting) return;
   const count = getAgentSelectedFiles().length;
-  agentSubmitBtn.disabled = count === 0;
+  const borrowerName = agentBorrowerName && agentBorrowerName.value ? agentBorrowerName.value.trim() : '';
+  agentSubmitBtn.disabled = count === 0 || !borrowerName;
   agentSubmitBtn.textContent = count > 0 ? `Submit Files (${count})` : 'Submit Files (0)';
 }
 
@@ -2065,7 +2142,8 @@ function setAgentUploadProgress(percent, label) {
 function setAgentSubmittingState(active) {
   isAgentSubmitting = active;
   if (agentSubmitBtn) {
-    agentSubmitBtn.disabled = active || getAgentSelectedFiles().length === 0;
+    const borrowerName = agentBorrowerName && agentBorrowerName.value ? agentBorrowerName.value.trim() : '';
+    agentSubmitBtn.disabled = active || getAgentSelectedFiles().length === 0 || !borrowerName;
     agentSubmitBtn.classList.toggle('is-loading', active);
     if (active) {
       agentSubmitBtn.textContent = 'Submitting';
@@ -2165,6 +2243,10 @@ async function submitAgentFile() {
   }
 
   const borrowerName = agentBorrowerName && agentBorrowerName.value.trim() ? agentBorrowerName.value.trim() : '';
+  if (!borrowerName) {
+    alert('Borrower name is required.');
+    return;
+  }
   const leadReference = agentLeadReference && agentLeadReference.value.trim() ? agentLeadReference.value.trim() : '';
   const parseMode = getSelectedParseMode();
 
@@ -2205,6 +2287,7 @@ async function loadEvaluatorSubmissions() {
     return;
   }
   evaluatorSubmissionsCache = (body && body.items) || [];
+  pruneSelectedEvaluatorSubmissionIds();
   renderEvaluatorSubmissionTableFiltered();
 }
 
@@ -2799,6 +2882,11 @@ if (agentFileInput) {
     renderAgentSelectedFiles();
   });
 }
+if (agentBorrowerName) {
+  agentBorrowerName.addEventListener('input', () => {
+    updateAgentSubmitButtonState();
+  });
+}
 if (agentSearchInput) {
   agentSearchInput.addEventListener('input', () => {
     agentSubmissionsPage = 1;
@@ -2862,8 +2950,26 @@ if (agentDropZone && agentFileInput) {
 }
 renderAgentSelectedFiles();
 updateAgentSubmitButtonState();
+updateEvaluatorCombineButtonState();
 if (evaluatorRefreshBtn) evaluatorRefreshBtn.addEventListener('click', loadEvaluatorSubmissions);
+if (evaluatorCombineBtn) {
+  evaluatorCombineBtn.addEventListener('click', async () => {
+    await combineSelectedEvaluatorSubmissions();
+  });
+}
 if (evaluatorSubmissionList) {
+  evaluatorSubmissionList.addEventListener('change', (e) => {
+    const checkbox = e.target.closest('input.evaluator-select-checkbox');
+    if (!checkbox) return;
+    const submissionId = String(checkbox.dataset.submissionId || '').trim();
+    if (!submissionId) return;
+    if (checkbox.checked) {
+      evaluatorSelectedSubmissionIds.add(submissionId);
+    } else {
+      evaluatorSelectedSubmissionIds.delete(submissionId);
+    }
+    updateEvaluatorCombineButtonState();
+  });
   evaluatorSubmissionList.addEventListener('click', async (e) => {
     const pageBtn = e.target.closest('button.agent-page-btn');
     if (pageBtn) {
