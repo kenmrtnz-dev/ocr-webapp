@@ -1390,11 +1390,11 @@ def evaluator_patch_page_transactions(
         try:
             page_data = get_submission_page(submission_id, key, user)
             page_status = page_data.get("page_status") or {}
-            updated_at = str(page_status.get("updated_at") or "").strip()
             saved_at = str(page_status.get("saved_at") or "").strip()
             expected = str(payload.expected_updated_at or "").strip()
-            # Compatibility path: older clients may still send saved_at as the token.
-            if updated_at and expected not in {updated_at, saved_at}:
+            # Use saved_at as the optimistic lock token.
+            # updated_at can change from background parse/status activity and causes false conflicts.
+            if saved_at and expected != saved_at:
                 raise HTTPException(status_code=409, detail="page_conflict_reload")
         except ValueError as exc:
             if str(exc) != "page_not_found":

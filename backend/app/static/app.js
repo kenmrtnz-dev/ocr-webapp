@@ -1885,9 +1885,7 @@ function normalizeBorrowerNameForCompare(value) {
 
 function getPageConcurrencyToken(pageStatus) {
   const saved = String((pageStatus && pageStatus.saved_at) || '').trim();
-  if (saved) return saved;
-  const updated = String((pageStatus && pageStatus.updated_at) || '').trim();
-  return updated || null;
+  return saved || null;
 }
 
 function pruneSelectedEvaluatorSubmissionIds() {
