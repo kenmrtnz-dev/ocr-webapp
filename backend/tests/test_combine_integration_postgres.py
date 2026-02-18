@@ -1,5 +1,8 @@
+import json
 import os
+import re
 import uuid
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, func, select, text
@@ -158,7 +161,7 @@ def test_combine_success_creates_submission_job_and_audit_log(
     monkeypatch,
     postgres_session_factory,
 ):
-    _app, _tmp_path = app_with_temp_data
+    _app, tmp_path = app_with_temp_data
     evaluator_id = uuid.uuid4()
 
     sub_a, sub_b = _seed_submission_pair(
@@ -183,6 +186,11 @@ def test_combine_success_creates_submission_job_and_audit_log(
     payload = res.json()
     new_submission_id = uuid.UUID(payload["submission_id"])
     new_job_id = uuid.UUID(payload["job_id"])
+    meta_path = Path(tmp_path, "jobs", payload["job_id"], "meta.json")
+    assert meta_path.exists()
+    meta_payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert re.match(r"^\d{12}-JUAN-DELA-CRUZ-6MOS-BANKSTATEMENTS\.pdf$", str(meta_payload.get("original_filename") or ""))
+    assert meta_payload.get("source_submission_ids") == [str(sub_a), str(sub_b)]
 
     db = postgres_session_factory()
     try:

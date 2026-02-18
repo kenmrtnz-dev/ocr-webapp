@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 import uuid, os, json, time
+import datetime as dt
 import logging
 from typing import List, Dict, Optional
 import shutil
@@ -46,6 +47,7 @@ from app.workflow_service import (
     can_generate_exports,
     combine_submissions_for_evaluator,
     compute_summary,
+    build_combined_filename,
     finish_review_and_build_summary,
     create_report_record,
     create_submission_with_job,
@@ -58,6 +60,7 @@ from app.workflow_service import (
     list_submission_pages,
     list_submissions_for_evaluator,
     mark_page_reviewed,
+    normalize_combined_filename_for_submission,
     persist_page_transactions,
     persist_evaluator_transactions,
     normalize_borrower_name,
@@ -212,6 +215,14 @@ def _authorize_job_access(job: JobRecord, user: AuthUser, write: bool = False):
 
 
 def _read_submission_original_filename(submission_payload: Dict) -> str:
+    created_at_raw = str((submission_payload or {}).get("created_at") or "").strip()
+    created_at: Optional[dt.datetime] = None
+    if created_at_raw:
+        try:
+            created_at = dt.datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
+        except Exception:
+            created_at = None
+
     job_id = str((submission_payload or {}).get("current_job_id") or "").strip()
     if not job_id:
         return "-"
@@ -220,7 +231,15 @@ def _read_submission_original_filename(submission_payload: Dict) -> str:
         try:
             with open(meta_path) as f:
                 meta = json.load(f)
-            name = str((meta or {}).get("original_filename") or "").strip()
+            source_submission_ids = (meta or {}).get("source_submission_ids")
+            if not isinstance(source_submission_ids, list):
+                source_submission_ids = None
+            name = normalize_combined_filename_for_submission(
+                original_filename=(meta or {}).get("original_filename"),
+                borrower_name=(submission_payload or {}).get("borrower_name"),
+                created_at=created_at,
+                source_submission_ids=source_submission_ids,
+            )
             if name:
                 return name
         except Exception as exc:
@@ -1091,7 +1110,12 @@ def evaluator_list_submissions(
     user: AuthUser = Depends(require_role("credit_evaluator")),
 ):
     rows = list_submissions_for_evaluator(user, include_unassigned=include_unassigned)
-    return {"items": [serialize_submission(s) for s in rows]}
+    items = []
+    for row in rows:
+        payload = serialize_submission(row)
+        payload["original_filename"] = _read_submission_original_filename(payload)
+        items.append(payload)
+    return {"items": items}
 
 
 @app.post("/evaluator/submissions/{submission_id}/assign")
@@ -1135,10 +1159,11 @@ def evaluator_combine_submissions(
             f,
         )
     try:
+        combined_filename = build_combined_filename(sub.borrower_name or "", sub.created_at or dt.datetime.now(dt.timezone.utc))
         with open(os.path.join(job_dir, "meta.json"), "w") as f:
             json.dump(
                 {
-                    "original_filename": "combined.pdf",
+                    "original_filename": combined_filename,
                     "source_submission_ids": [str(sid) for sid in payload.submission_ids],
                 },
                 f,
@@ -1361,8 +1386,12 @@ def evaluator_patch_page_transactions(
     if payload.expected_updated_at:
         try:
             page_data = get_submission_page(submission_id, key, user)
-            updated_at = str((page_data.get("page_status") or {}).get("updated_at") or "")
-            if updated_at and updated_at != payload.expected_updated_at:
+            page_status = page_data.get("page_status") or {}
+            updated_at = str(page_status.get("updated_at") or "").strip()
+            saved_at = str(page_status.get("saved_at") or "").strip()
+            expected = str(payload.expected_updated_at or "").strip()
+            # Compatibility path: older clients may still send saved_at as the token.
+            if updated_at and expected not in {updated_at, saved_at}:
                 raise HTTPException(status_code=409, detail="page_conflict_reload")
         except ValueError as exc:
             if str(exc) != "page_not_found":
@@ -1566,7 +1595,8 @@ def evaluator_download_report(report_id: uuid.UUID, user: AuthUser = Depends(req
         abs_path = blob_abs_path(report.blob_key)
         if not os.path.exists(abs_path):
             raise HTTPException(status_code=404, detail="report_blob_not_found")
-        return FileResponse(abs_path, media_type="application/pdf", filename=f"summary_{report.id}.pdf")
+        download_name = build_combined_filename(sub.borrower_name or "", report.created_at or dt.datetime.now(dt.timezone.utc))
+        return FileResponse(abs_path, media_type="application/pdf", filename=download_name)
     finally:
         db.close()
 

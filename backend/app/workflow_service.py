@@ -2,6 +2,7 @@ import datetime as dt
 import io
 import json
 import os
+import re
 import uuid
 from typing import Dict, List, Optional, Tuple
 
@@ -17,6 +18,8 @@ from app.workflow_models import AuditLog, JobRecord, Report, Submission, Submiss
 ALLOWED_STATES = {"for_review", "processing", "summary_generated", "failed"}
 PARSE_STATUS_VALUES = {"pending", "processing", "done", "failed"}
 REVIEW_STATUS_VALUES = {"pending", "in_review", "saved", "reviewed"}
+COMBINED_FILENAME_PATTERN = re.compile(r"^\d{12}-[A-Z0-9]+(?:-[A-Z0-9]+)*-6MOS-BANKSTATEMENTS(?:\.pdf)?$", re.IGNORECASE)
+LEGACY_COMBINED_FILENAME_MARKERS = {"combined", "combined.pdf", "merged", "merged.pdf"}
 
 
 def normalize_borrower_name(value: Optional[str]) -> Optional[str]:
@@ -24,6 +27,45 @@ def normalize_borrower_name(value: Optional[str]) -> Optional[str]:
     if not raw:
         return None
     return raw.title()
+
+
+def _sanitize_business_name_for_filename(value: str) -> str:
+    token = str(value or "").strip().upper()
+    token = re.sub(r'[\/\\:\*\?"<>\|]+', "-", token)
+    token = re.sub(r"\s+", "-", token)
+    token = re.sub(r"[^A-Z0-9-]+", "-", token)
+    token = re.sub(r"-{2,}", "-", token).strip("-")
+    return token or "BORROWER"
+
+
+def build_combined_filename(borrower_name: str, ts: dt.datetime) -> str:
+    timestamp = ts
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.astimezone(dt.timezone.utc)
+    business_name = _sanitize_business_name_for_filename(normalize_borrower_name(borrower_name) or "")
+    return f"{timestamp.strftime('%m%d%Y%H%M')}-{business_name}-6MOS-BANKSTATEMENTS.pdf"
+
+
+def is_compliant_combined_filename(value: Optional[str]) -> bool:
+    return bool(COMBINED_FILENAME_PATTERN.match(str(value or "").strip()))
+
+
+def normalize_combined_filename_for_submission(
+    original_filename: Optional[str],
+    borrower_name: Optional[str],
+    created_at: Optional[dt.datetime],
+    source_submission_ids: Optional[List[str]] = None,
+) -> Optional[str]:
+    raw_name = str(original_filename or "").strip()
+    if not raw_name:
+        return None
+    source_ids = [str(item).strip() for item in (source_submission_ids or []) if str(item).strip()]
+    is_likely_combined = bool(source_ids) or raw_name.casefold() in LEGACY_COMBINED_FILENAME_MARKERS
+    if not is_likely_combined:
+        return raw_name
+    if is_compliant_combined_filename(raw_name):
+        return raw_name if raw_name.lower().endswith(".pdf") else f"{raw_name}.pdf"
+    return build_combined_filename(borrower_name or "", created_at or dt.datetime.now(dt.timezone.utc))
 
 
 def _normalized_borrower_key(value: Optional[str]) -> str:

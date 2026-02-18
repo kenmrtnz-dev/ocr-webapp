@@ -79,6 +79,100 @@ def test_page_save_conflict_returns_409(client_factory, monkeypatch):
     assert res.json().get("detail") == "page_conflict_reload"
 
 
+def test_page_save_with_matching_updated_at_succeeds(client_factory, monkeypatch):
+    user_id = uuid.uuid4()
+    submission_id = uuid.uuid4()
+    monkeypatch.setattr(main, "get_submission_for_user", lambda *_args, **_kwargs: _submission(submission_id, user_id))
+
+    page_status = {
+        "updated_at": "2026-02-16T10:00:00+00:00",
+        "saved_at": "2026-02-16T09:59:59+00:00",
+    }
+    monkeypatch.setattr(main, "get_submission_page", lambda *_args, **_kwargs: {"page_status": page_status, "rows": []})
+
+    calls = {"count": 0}
+
+    def _persist(**kwargs):
+        calls["count"] += 1
+        return {
+            "summary": {},
+            "page_status": {
+                "page_key": "page_001",
+                "index": 1,
+                "parse_status": "done",
+                "review_status": "saved",
+                "saved_at": "2026-02-16T10:00:01+00:00",
+                "rows_count": 0,
+                "has_unsaved": False,
+                "updated_at": "2026-02-16T10:00:01+00:00",
+            },
+            "review_progress": {"total_pages": 1, "parsed_pages": 1, "reviewed_pages": 1, "percent": 100},
+            "can_export": True,
+        }
+
+    monkeypatch.setattr(main, "persist_page_transactions", _persist)
+
+    with client_factory(role="credit_evaluator", user_id=user_id) as client:
+        res = client.patch(
+            f"/evaluator/submissions/{submission_id}/pages/page_001/transactions",
+            json={
+                "rows": [],
+                "expected_updated_at": "2026-02-16T10:00:00+00:00",
+            },
+        )
+
+    assert res.status_code == 200
+    assert res.json().get("ok") is True
+    assert calls["count"] == 1
+
+
+def test_page_save_with_legacy_saved_at_token_succeeds(client_factory, monkeypatch):
+    user_id = uuid.uuid4()
+    submission_id = uuid.uuid4()
+    monkeypatch.setattr(main, "get_submission_for_user", lambda *_args, **_kwargs: _submission(submission_id, user_id))
+
+    page_status = {
+        "updated_at": "2026-02-16T10:00:00+00:00",
+        "saved_at": "2026-02-16T09:59:59+00:00",
+    }
+    monkeypatch.setattr(main, "get_submission_page", lambda *_args, **_kwargs: {"page_status": page_status, "rows": []})
+
+    calls = {"count": 0}
+
+    def _persist(**kwargs):
+        calls["count"] += 1
+        return {
+            "summary": {},
+            "page_status": {
+                "page_key": "page_001",
+                "index": 1,
+                "parse_status": "done",
+                "review_status": "saved",
+                "saved_at": "2026-02-16T10:00:01+00:00",
+                "rows_count": 0,
+                "has_unsaved": False,
+                "updated_at": "2026-02-16T10:00:01+00:00",
+            },
+            "review_progress": {"total_pages": 1, "parsed_pages": 1, "reviewed_pages": 1, "percent": 100},
+            "can_export": True,
+        }
+
+    monkeypatch.setattr(main, "persist_page_transactions", _persist)
+
+    with client_factory(role="credit_evaluator", user_id=user_id) as client:
+        res = client.patch(
+            f"/evaluator/submissions/{submission_id}/pages/page_001/transactions",
+            json={
+                "rows": [],
+                "expected_updated_at": "2026-02-16T09:59:59+00:00",
+            },
+        )
+
+    assert res.status_code == 200
+    assert res.json().get("ok") is True
+    assert calls["count"] == 1
+
+
 def test_report_and_excel_export_blocked_when_review_incomplete(client_factory, monkeypatch):
     user_id = uuid.uuid4()
     submission_id = uuid.uuid4()

@@ -1,4 +1,6 @@
 import json
+import datetime as dt
+import re
 import types
 import uuid
 from pathlib import Path
@@ -93,6 +95,18 @@ def test_create_submission_with_job_normalizes_borrower_name(monkeypatch):
     )
 
     assert sub.borrower_name == "Juan Dela Cruz"
+
+
+def test_build_combined_filename_formats_business_name():
+    ts = dt.datetime(2026, 2, 18, 14, 30, tzinfo=dt.timezone.utc)
+    filename = workflow_service.build_combined_filename("  Acme   Trading ", ts)
+    assert filename == "021820261430-ACME-TRADING-6MOS-BANKSTATEMENTS.pdf"
+
+
+def test_build_combined_filename_sanitizes_invalid_filename_chars():
+    ts = dt.datetime(2026, 2, 18, 14, 30, tzinfo=dt.timezone.utc)
+    filename = workflow_service.build_combined_filename(' A/C\\M:E*? "Trading" <Ltd>| ', ts)
+    assert filename == "021820261430-A-C-M-E-TRADING-LTD-6MOS-BANKSTATEMENTS.pdf"
 
 
 def test_evaluator_combine_mixed_borrower_returns_400(client_factory, monkeypatch):
@@ -198,3 +212,63 @@ def test_evaluator_combine_success_returns_new_submission_id(client_factory, app
     assert status_path.exists()
     status_payload = json.loads(status_path.read_text(encoding="utf-8"))
     assert status_payload.get("status") == "for_review"
+
+    meta_path = Path(tmp_path, "jobs", body["job_id"], "meta.json")
+    assert meta_path.exists()
+    meta_payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert re.match(r"^\d{12}-JUAN-DELA-CRUZ-6MOS-BANKSTATEMENTS\.pdf$", str(meta_payload.get("original_filename") or ""))
+    assert meta_payload.get("source_submission_ids") == [str(source_a.id), str(source_b.id)]
+
+
+def test_agent_submission_list_preserves_original_filename_for_non_combined(client_factory, app_with_temp_data, monkeypatch):
+    _app, tmp_path = app_with_temp_data
+    job_id = uuid.uuid4()
+    job_dir = Path(tmp_path, "jobs", str(job_id))
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "meta.json").write_text(json.dumps({"original_filename": "statement-original.pdf"}), encoding="utf-8")
+
+    monkeypatch.setattr(main, "list_submissions_for_agent", lambda *_args, **_kwargs: [object()])
+    monkeypatch.setattr(
+        main,
+        "serialize_submission",
+        lambda _row: {
+            "id": str(uuid.uuid4()),
+            "current_job_id": str(job_id),
+            "input_pdf_key": f"jobs/{job_id}/input/document.pdf",
+        },
+    )
+
+    with client_factory(role="agent") as client:
+        res = client.get("/agent/submissions")
+
+    assert res.status_code == 200
+    items = res.json().get("items") or []
+    assert items and items[0].get("original_filename") == "statement-original.pdf"
+
+
+def test_agent_submission_list_normalizes_legacy_combined_filename(client_factory, app_with_temp_data, monkeypatch):
+    _app, tmp_path = app_with_temp_data
+    job_id = uuid.uuid4()
+    job_dir = Path(tmp_path, "jobs", str(job_id))
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "meta.json").write_text(json.dumps({"original_filename": "combined.pdf"}), encoding="utf-8")
+
+    monkeypatch.setattr(main, "list_submissions_for_agent", lambda *_args, **_kwargs: [object()])
+    monkeypatch.setattr(
+        main,
+        "serialize_submission",
+        lambda _row: {
+            "id": str(uuid.uuid4()),
+            "current_job_id": str(job_id),
+            "input_pdf_key": f"jobs/{job_id}/input/document.pdf",
+            "borrower_name": "  jUAN   dELA   cRUZ ",
+            "created_at": "2026-02-18T14:30:45+00:00",
+        },
+    )
+
+    with client_factory(role="agent") as client:
+        res = client.get("/agent/submissions")
+
+    assert res.status_code == 200
+    items = res.json().get("items") or []
+    assert items and items[0].get("original_filename") == "021820261430-JUAN-DELA-CRUZ-6MOS-BANKSTATEMENTS.pdf"

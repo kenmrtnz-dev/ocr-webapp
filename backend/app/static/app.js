@@ -1881,6 +1881,13 @@ function normalizeBorrowerNameForCompare(value) {
   return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
+function getPageConcurrencyToken(pageStatus) {
+  const updated = String((pageStatus && pageStatus.updated_at) || '').trim();
+  if (updated) return updated;
+  const saved = String((pageStatus && pageStatus.saved_at) || '').trim();
+  return saved || null;
+}
+
 function pruneSelectedEvaluatorSubmissionIds() {
   const validIds = new Set((evaluatorSubmissionsCache || []).map((item) => String(item.id || '')));
   evaluatorSelectedSubmissionIds.forEach((id) => {
@@ -2043,14 +2050,13 @@ function renderEvaluatorSubmissionTable(items) {
     const statusClass = `workflow-status workflow-status-${status.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
     const assignBtn = item.assigned_evaluator_id ? '' : `<button class="preview-nav workflow-mini-btn" data-action="assign" data-id="${item.id}">Assign</button>`;
     const openBtn = item.assigned_evaluator_id ? `<button class="preview-nav workflow-mini-btn" data-action="open" data-id="${item.id}">Open</button>` : '';
-    const agentLabel = item.agent_email || item.agent_id || '-';
+    const filename = getSubmissionFilename(item);
     const checked = evaluatorSelectedSubmissionIds.has(String(item.id || '')) ? ' checked' : '';
     return `<tr>
       <td><input type="checkbox" class="evaluator-select-checkbox" data-submission-id="${escapeHtml(String(item.id || ''))}"${checked}></td>
       <td>${escapeHtml(formatAgentSubmissionDate(item.created_at))}</td>
-      <td title="${escapeHtml(agentLabel)}">${escapeHtml(agentLabel)}</td>
-      <td>${escapeHtml(item.borrower_name || '-')}</td>
-      <td>${escapeHtml(item.lead_reference || '-')}</td>
+      <td class="submission-filename-cell" title="${escapeHtml(filename)}">${escapeHtml(filename)}</td>
+      <td title="${escapeHtml(item.borrower_name || '-')}">${escapeHtml(item.borrower_name || '-')}</td>
       <td class="agent-submission-id" title="${escapeHtml(item.id || '-')}">${escapeHtml(item.id || '-')}</td>
       <td><span class="${statusClass}">${escapeHtml(statusLabel)}</span></td>
       <td class="workflow-item-actions">${assignBtn}${openBtn}</td>
@@ -2058,7 +2064,7 @@ function renderEvaluatorSubmissionTable(items) {
   });
   const fillerCount = Math.max(0, EVALUATOR_SUBMISSIONS_PAGE_SIZE - pageItems.length);
   for (let i = 0; i < fillerCount; i += 1) {
-    rowHtml.push('<tr class="agent-row-filler"><td colspan="8"></td></tr>');
+    rowHtml.push('<tr class="agent-row-filler"><td colspan="7"></td></tr>');
   }
   const rows = rowHtml.join('');
 
@@ -2074,9 +2080,8 @@ function renderEvaluatorSubmissionTable(items) {
         <tr>
           <th>Select</th>
           <th>Date</th>
-          <th>Agent</th>
+          <th>Filename</th>
           <th>Borrower Name</th>
-          <th>Lead Reference</th>
           <th>Submission ID</th>
           <th>Status</th>
           <th>Actions</th>
@@ -2495,7 +2500,7 @@ async function loadActivePage(pageKey) {
   boundsByPage[key] = Array.isArray(body.bounds) ? body.bounds : [];
   identityBoundsByPage[key] = Array.isArray(body.identity_bounds) ? body.identity_bounds : [];
   applyGuideStatePayload(key, body.guide_state || {});
-  activePageUpdatedAt = body.page_status && body.page_status.saved_at ? body.page_status.saved_at : null;
+  activePageUpdatedAt = getPageConcurrencyToken(body.page_status);
   activePageReviewStatus = body.page_status && body.page_status.review_status ? String(body.page_status.review_status) : 'pending';
   activePageKey = key;
   activePageDirty = false;
@@ -2550,7 +2555,7 @@ async function saveActivePageIfDirty(options = {}) {
       return false;
     }
     activePageDirty = false;
-    activePageUpdatedAt = body.page_status && body.page_status.saved_at ? body.page_status.saved_at : activePageUpdatedAt;
+    activePageUpdatedAt = getPageConcurrencyToken(body.page_status) || activePageUpdatedAt;
     activePageReviewStatus = body.page_status && body.page_status.review_status ? String(body.page_status.review_status) : activePageReviewStatus;
     if (pageKey && body.page_status) {
       const idx = evaluatorManifest.findIndex((p) => String(p.page_key || '') === String(pageKey));
