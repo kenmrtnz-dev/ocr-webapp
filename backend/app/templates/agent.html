@@ -128,21 +128,45 @@
                         <div class="top-panels">
                             <div class="preview-panel">
                                 <div class="preview-toolbar">
-                                    <button class="preview-nav" id="prevPageBtn">Prev</button>
-                                    <span id="pageIndicator">Page 0 / 0</span>
-                                    <button class="preview-nav" id="nextPageBtn">Next</button>
-                                    <select class="preview-page-select" id="pageSelect" aria-label="Jump to page">
-                                        <option value="">Page</option>
-                                    </select>
-                                    <button class="preview-nav preview-nav-icon" id="zoomOutBtn" aria-label="Zoom out" title="Zoom out">-</button>
-                                    <span class="preview-zoom" id="zoomLevel">100%</span>
-                                    <button class="preview-nav preview-nav-icon" id="zoomInBtn" aria-label="Zoom in" title="Zoom in">+</button>
-                                    <button class="preview-nav" id="resetViewBtn">Reset View</button>
+                                    <div class="preview-toolbar-group preview-toolbar-main">
+                                        <button class="preview-nav preview-nav-icon" id="prevPageBtn" aria-label="Previous page" title="Previous page"><i class="fa-solid fa-chevron-left" aria-hidden="true"></i></button>
+                                        <span id="pageIndicator">0/0</span>
+                                        <button class="preview-nav preview-nav-icon" id="nextPageBtn" aria-label="Next page" title="Next page"><i class="fa-solid fa-chevron-right" aria-hidden="true"></i></button>
+                                        <button class="preview-nav preview-nav-icon" id="zoomInBtn" aria-label="Zoom in" title="Zoom in"><i class="fa-solid fa-plus" aria-hidden="true"></i></button>
+                                        <button class="preview-nav preview-nav-icon" id="zoomOutBtn" aria-label="Zoom out" title="Zoom out"><i class="fa-solid fa-minus" aria-hidden="true"></i></button>
+                                        <button class="preview-nav preview-nav-icon" id="resetViewBtn" aria-label="Reset view" title="Reset view"><i class="fa-solid fa-rotate-left" aria-hidden="true"></i></button>
+                                    </div>
+                                    <span class="preview-toolbar-divider" aria-hidden="true"></span>
+                                    <div class="preview-toolbar-group preview-toolbar-ocr">
+                                        <button class="preview-nav preview-nav-icon preview-tool-btn" id="guideUndoBtn" aria-label="Undo guide change" title="Undo guide change"><i class="fa-solid fa-arrow-rotate-left" aria-hidden="true"></i></button>
+                                        <button class="preview-nav preview-nav-icon preview-tool-btn" id="guideRedoBtn" aria-label="Redo guide change" title="Redo guide change"><i class="fa-solid fa-arrow-rotate-right" aria-hidden="true"></i></button>
+                                        <button class="preview-nav preview-nav-icon preview-tool-btn" id="addHorizontalGuideBtn" aria-label="Add horizontal guide line" title="Add horizontal guide line"><i class="fa-solid fa-grip-lines" aria-hidden="true"></i></button>
+                                        <button class="preview-nav preview-nav-icon preview-tool-btn" id="clearGuideLinesBtn" aria-label="Clear guide lines" title="Clear guide lines"><i class="fa-solid fa-eraser" aria-hidden="true"></i></button>
+                                        <button class="csv-button preview-ocr-toolbar-btn" id="runSectionOcrBtn" title="Run Tesseract OCR on guide sections">OCR</button>
+                                    </div>
+                                    <span class="preview-toolbar-divider" aria-hidden="true"></span>
+                                    <div class="preview-toolbar-group preview-toolbar-image" aria-label="Image cleanup tools">
+                                        <button class="preview-nav preview-nav-icon preview-tool-btn preview-image-tool-btn" data-image-tool="deskew" aria-label="Deskew" title="Deskew"><i class="fa-solid fa-ruler-combined" aria-hidden="true"></i></button>
+                                        <button class="preview-nav preview-nav-icon preview-tool-btn preview-image-tool-btn" data-image-tool="contrast" aria-label="Contrast normalize" title="Contrast normalize"><i class="fa-solid fa-circle-half-stroke" aria-hidden="true"></i></button>
+                                        <button class="preview-nav preview-nav-icon preview-tool-btn preview-image-tool-btn" data-image-tool="binarize" aria-label="Binarize" title="Binarize"><i class="fa-solid fa-border-all" aria-hidden="true"></i></button>
+                                        <button class="preview-nav preview-nav-icon preview-tool-btn preview-image-tool-btn" data-image-tool="denoise" aria-label="Denoise" title="Denoise"><i class="fa-solid fa-filter" aria-hidden="true"></i></button>
+                                        <button class="preview-nav preview-nav-icon preview-tool-btn preview-image-tool-btn" data-image-tool="sharpen" aria-label="Sharpen text" title="Sharpen text"><i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i></button>
+                                        <button class="preview-nav preview-nav-icon preview-tool-btn preview-image-tool-btn" data-image-tool="remove_lines" aria-label="Remove lines" title="Remove lines"><i class="fa-solid fa-grip-lines" aria-hidden="true"></i></button>
+                                        <button class="preview-nav preview-nav-icon preview-tool-btn preview-image-tool-btn" data-image-tool="reset" aria-label="Reset cleanup" title="Reset cleanup"><i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i></button>
+                                    </div>
+                                    <span id="previewPageSavedMark" class="preview-page-saved is-unsaved" role="status" aria-label="Not saved" title="Not saved">
+                                        <i class="fa-regular fa-floppy-disk" aria-hidden="true"></i>
+                                    </span>
                                 </div>
-                                <div class="preview-canvas-wrap">
-                                    <img id="previewImage" alt="Statement page preview">
-                                    <canvas id="previewCanvas"></canvas>
+                                <div class="preview-columns-ruler" id="previewColumnsRuler" aria-label="OCR column guides"></div>
+                                <div class="preview-stage">
+                                    <div class="preview-rows-ruler" id="previewRowsRuler" aria-label="OCR row guides"></div>
+                                    <div class="preview-canvas-wrap">
+                                        <img id="previewImage" alt="Statement page preview">
+                                        <canvas id="previewCanvas"></canvas>
+                                    </div>
                                 </div>
+                                <div class="preview-section-ocr is-hidden" id="sectionOcrResult"></div>
                             </div>
                             <div class="summary-card">
                                 <h3>Summary</h3>

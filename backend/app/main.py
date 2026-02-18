@@ -3,22 +3,27 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
-import uuid, os, json
+import uuid, os, json, time
 import logging
 from typing import List, Dict, Optional
 import shutil
 import cv2
 import numpy as np
 import math
+import pytesseract
 from pdf2image import convert_from_path
 from PIL import Image
 
 from app.celery_app import process_pdf, prepare_draft
-from app.bank_profiles import detect_bank_profile, extract_account_identity, find_value_bounds, reload_profiles
+from app.bank_profiles import PROFILES, detect_bank_profile, extract_account_identity, find_value_bounds, reload_profiles
 from app.ocr_engine import ocr_image
 from app.pdf_text_extract import extract_pdf_layout_pages
-from app.profile_analyzer import analyze_account_identity_from_text
-from app.statement_parser import parse_page_with_profile_fallback, is_transaction_row
+from app.profile_analyzer import (
+    analyze_account_identity_from_text,
+    analyze_unknown_bank_and_apply,
+    analyze_unknown_bank_and_apply_guided,
+)
+from app.statement_parser import normalize_amount, normalize_date, parse_page_with_profile_fallback, is_transaction_row
 from app.image_cleaner import clean_page
 from app.auth_service import (
     AuthUser,
@@ -35,19 +40,28 @@ from app.auth_service import (
 )
 from app.blob_store import write_blob, blob_abs_path
 from app.db import Base, SessionLocal, engine
-from app.workflow_models import User, Submission, JobRecord, Transaction, Report, AuditLog
+from app.workflow_models import User, Submission, SubmissionPage, JobRecord, Transaction, Report, AuditLog
 from app.workflow_service import (
     assign_submission_to_evaluator,
+    can_generate_exports,
     compute_summary,
+    finish_review_and_build_summary,
     create_report_record,
     create_submission_with_job,
+    ensure_submission_pages,
     get_submission_for_user,
+    get_submission_page,
+    get_submission_review_status,
     get_transactions_for_submission,
     list_submissions_for_agent,
+    list_submission_pages,
     list_submissions_for_evaluator,
+    mark_page_reviewed,
+    persist_page_transactions,
     persist_evaluator_transactions,
     serialize_submission,
     serialize_transaction,
+    set_page_parse_status,
     set_submission_summary_generated,
     set_submission_summary_ready,
 )
@@ -55,6 +69,15 @@ from sqlalchemy import select, delete, func
 
 DATA_DIR = os.getenv("DATA_DIR", "./data")
 PREVIEW_MAX_PIXELS = int(os.getenv("PREVIEW_MAX_PIXELS", "6000000"))
+AI_ANALYZER_ENABLED = str(os.getenv("AI_ANALYZER_ENABLED", "true")).strip().lower() not in {"0", "false", "no"}
+AI_ANALYZER_PROVIDER = str(os.getenv("AI_ANALYZER_PROVIDER", "gemini")).strip().lower() or "gemini"
+AI_ANALYZER_MODEL = str(os.getenv("AI_ANALYZER_MODEL", "gemini-2.5-flash")).strip() or "gemini-2.5-flash"
+AI_ANALYZER_SAMPLE_PAGES = int(os.getenv("AI_ANALYZER_SAMPLE_PAGES", "3"))
+AI_ANALYZER_MIN_ROWS = int(os.getenv("AI_ANALYZER_MIN_ROWS", "3"))
+AI_ANALYZER_MIN_DATE_RATIO = float(os.getenv("AI_ANALYZER_MIN_DATE_RATIO", "0.80"))
+AI_ANALYZER_MIN_BAL_RATIO = float(os.getenv("AI_ANALYZER_MIN_BAL_RATIO", "0.80"))
+EDITOR_STATE_FILENAME = "editor_state.json"
+TEXT_STALE_SECONDS = int(os.getenv("TEXT_STALE_SECONDS", "120"))
 
 app = FastAPI(title="OCR Passbook / SOA API")
 logger = logging.getLogger(__name__)
@@ -206,6 +229,381 @@ def _read_submission_original_filename(submission_payload: Dict) -> str:
         if parts:
             return parts[-1]
     return "-"
+
+
+def _read_json_if_exists(path: str, default):
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception as exc:
+        logger.warning("Failed to read JSON file: %s", path, exc_info=exc)
+        return default
+
+
+def _coerce_progress(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _sanitize_editor_guide_state(payload: Dict) -> Dict:
+    if not isinstance(payload, dict):
+        return {}
+    allowed_keys = {"date", "description", "debit", "credit", "balance"}
+    columns = []
+    for item in payload.get("column_layout") or []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip().lower()
+        if key not in allowed_keys:
+            continue
+        try:
+            width = float(item.get("width"))
+        except Exception:
+            continue
+        if not np.isfinite(width):
+            continue
+        columns.append({"key": key, "width": max(0.02, width)})
+    if columns:
+        total = sum(c["width"] for c in columns) or 1.0
+        columns = [{"key": c["key"], "width": c["width"] / total} for c in columns]
+
+    horizontal = []
+    for item in payload.get("horizontal") or []:
+        try:
+            value = float(item)
+        except Exception:
+            continue
+        if not np.isfinite(value):
+            continue
+        if value <= 0.0 or value >= 1.0:
+            continue
+        horizontal.append(value)
+    horizontal = sorted(set(round(v, 6) for v in horizontal))
+    return {
+        "column_layout": columns,
+        "horizontal": horizontal,
+    }
+
+
+def _get_editor_state_path(submission: Submission) -> Optional[str]:
+    job_dir = _get_submission_job_dir(submission)
+    if not job_dir:
+        return None
+    return os.path.join(job_dir, "result", EDITOR_STATE_FILENAME)
+
+
+def _read_page_editor_state(submission: Submission, page_key: str) -> Dict:
+    path = _get_editor_state_path(submission)
+    if not path:
+        return {}
+    payload = _read_json_if_exists(path, {})
+    if not isinstance(payload, dict):
+        return {}
+    pages = payload.get("pages")
+    if not isinstance(pages, dict):
+        return {}
+    state = pages.get(page_key)
+    return _sanitize_editor_guide_state(state if isinstance(state, dict) else {})
+
+
+def _write_page_editor_state(submission: Submission, page_key: str, guide_state: Dict) -> None:
+    path = _get_editor_state_path(submission)
+    if not path:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = _read_json_if_exists(path, {})
+    if not isinstance(payload, dict):
+        payload = {}
+    pages = payload.get("pages")
+    if not isinstance(pages, dict):
+        pages = {}
+        payload["pages"] = pages
+    pages[str(page_key)] = _sanitize_editor_guide_state(guide_state)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp_path, path)
+
+
+def _sample_detected_profiles(layout_pages: List[Dict], max_pages: int) -> List[str]:
+    names: List[str] = []
+    for layout in layout_pages:
+        text = str((layout or {}).get("text") or "").strip()
+        if not text:
+            continue
+        names.append(detect_bank_profile(text).name)
+        if len(names) >= max(1, max_pages):
+            break
+    return names
+
+
+def _ocr_items_to_words(ocr_items: List[Dict]) -> List[Dict]:
+    words: List[Dict] = []
+    for item in ocr_items:
+        bbox = item.get("bbox") or []
+        text = str(item.get("text") or "").strip()
+        if len(bbox) != 4 or not text:
+            continue
+        try:
+            xs = [float(pt[0]) for pt in bbox]
+            ys = [float(pt[1]) for pt in bbox]
+        except Exception:
+            continue
+        words.append(
+            {
+                "text": text,
+                "x1": float(min(xs)),
+                "y1": float(min(ys)),
+                "x2": float(max(xs)),
+                "y2": float(max(ys)),
+            }
+        )
+    return words
+
+
+def _build_layout_pages_from_ocr(job_dir: str, sample_pages: int) -> List[Dict]:
+    cleaned_dir = os.path.join(job_dir, "cleaned")
+    pages_dir = os.path.join(job_dir, "pages")
+    ocr_dir = os.path.join(job_dir, "ocr")
+
+    page_files: List[str] = []
+    if os.path.isdir(cleaned_dir):
+        page_files = sorted(f for f in os.listdir(cleaned_dir) if f.endswith(".png"))
+    if not page_files and os.path.isdir(pages_dir):
+        page_files = sorted(f for f in os.listdir(pages_dir) if f.endswith(".png"))
+
+    layouts: List[Dict] = []
+    for page_file in page_files:
+        if len(layouts) >= max(1, sample_pages):
+            break
+        page_key = page_file.replace(".png", "")
+        image_path = os.path.join(cleaned_dir, page_file)
+        if not os.path.exists(image_path):
+            image_path = os.path.join(pages_dir, page_file)
+        if not os.path.exists(image_path):
+            continue
+
+        ocr_items: List[Dict] = []
+        ocr_json_path = os.path.join(ocr_dir, f"{page_key}.json")
+        if os.path.exists(ocr_json_path):
+            cached = _read_json_if_exists(ocr_json_path, [])
+            if isinstance(cached, list):
+                ocr_items = cached
+        if not ocr_items:
+            try:
+                ocr_items = ocr_image(image_path, backend="easyocr")
+            except Exception as exc:
+                logger.warning("OCR sampling failed for analyzer at %s", image_path, exc_info=exc)
+                ocr_items = []
+
+        words = _ocr_items_to_words(ocr_items)
+        text = " ".join(str(item.get("text") or "").strip() for item in ocr_items if str(item.get("text") or "").strip()).strip()
+        if not text and not words:
+            continue
+
+        width = 1.0
+        height = 1.0
+        img = cv2.imread(image_path)
+        if img is not None:
+            h, w = img.shape[:2]
+            width = float(max(w, 1))
+            height = float(max(h, 1))
+        elif words:
+            width = float(max(max((float(w.get("x2", 0.0)) for w in words), default=1.0), 1.0))
+            height = float(max(max((float(w.get("y2", 0.0)) for w in words), default=1.0), 1.0))
+
+        layouts.append(
+            {
+                "text": text,
+                "words": words,
+                "width": width,
+                "height": height,
+            }
+        )
+    return layouts
+
+
+def _persist_job_analyzer_meta(job_id: str, analyzer_meta: Dict) -> None:
+    job_dir = os.path.join(DATA_DIR, "jobs", str(job_id))
+    status_path = os.path.join(job_dir, "status.json")
+    diagnostics_path = os.path.join(job_dir, "result", "parse_diagnostics.json")
+    profile_update_path = os.path.join(job_dir, "result", "profile_update.json")
+
+    status = _read_json_if_exists(status_path, {})
+    if isinstance(status, dict):
+        status.update(
+            {
+                "profile_analyzer_triggered": bool(analyzer_meta.get("triggered", False)),
+                "profile_analyzer_provider": analyzer_meta.get("provider"),
+                "profile_analyzer_model": analyzer_meta.get("model"),
+                "profile_analyzer_result": analyzer_meta.get("result"),
+                "profile_analyzer_reason": analyzer_meta.get("reason"),
+                "profile_selected_after_analyzer": analyzer_meta.get("profile_name"),
+            }
+        )
+        try:
+            with open(status_path, "w") as f:
+                json.dump(status, f)
+        except Exception as exc:
+            logger.warning("Failed to persist analyzer status for job %s", str(job_id), exc_info=exc)
+
+    diagnostics = _read_json_if_exists(diagnostics_path, {"job": {}, "pages": {}})
+    if not isinstance(diagnostics, dict):
+        diagnostics = {"job": {}, "pages": {}}
+    job_diag = diagnostics.setdefault("job", {})
+    if not isinstance(job_diag, dict):
+        job_diag = {}
+        diagnostics["job"] = job_diag
+    job_diag.update(
+        {
+            "profile_analyzer_triggered": bool(analyzer_meta.get("triggered", False)),
+            "profile_analyzer_provider": analyzer_meta.get("provider"),
+            "profile_analyzer_model": analyzer_meta.get("model"),
+            "profile_analyzer_result": analyzer_meta.get("result"),
+            "profile_analyzer_reason": analyzer_meta.get("reason"),
+            "profile_selected_after_analyzer": analyzer_meta.get("profile_name"),
+        }
+    )
+    try:
+        os.makedirs(os.path.dirname(diagnostics_path), exist_ok=True)
+        with open(diagnostics_path, "w") as f:
+            json.dump(diagnostics, f, indent=2)
+    except Exception as exc:
+        logger.warning("Failed to persist analyzer diagnostics for job %s", str(job_id), exc_info=exc)
+
+    if analyzer_meta.get("triggered"):
+        try:
+            with open(profile_update_path, "w") as f:
+                json.dump(analyzer_meta, f, indent=2)
+        except Exception as exc:
+            logger.warning("Failed to persist profile update artifact for job %s", str(job_id), exc_info=exc)
+
+
+def _run_ai_profile_analyzer_for_job(
+    job_id: str,
+    layout_pages: Optional[List[Dict]] = None,
+    allow_ocr_fallback: bool = True,
+    force: bool = False,
+) -> Dict:
+    job_dir = os.path.join(DATA_DIR, "jobs", str(job_id))
+    diagnostics_path = os.path.join(job_dir, "result", "parse_diagnostics.json")
+    status_payload = _read_json_if_exists(os.path.join(job_dir, "status.json"), {})
+    diagnostics_payload = _read_json_if_exists(diagnostics_path, {})
+    existing_job_diag = (diagnostics_payload or {}).get("job", {}) if isinstance(diagnostics_payload, dict) else {}
+    if not isinstance(existing_job_diag, dict):
+        existing_job_diag = {}
+
+    existing_result = str(
+        existing_job_diag.get("profile_analyzer_result")
+        or (status_payload.get("profile_analyzer_result") if isinstance(status_payload, dict) else "")
+        or ""
+    ).strip().lower()
+    existing_reason = str(
+        existing_job_diag.get("profile_analyzer_reason")
+        or (status_payload.get("profile_analyzer_reason") if isinstance(status_payload, dict) else "")
+        or ""
+    ).strip().lower()
+    if (not force) and existing_result in {"applied", "rejected", "failed"}:
+        return {
+            "triggered": bool(existing_job_diag.get("profile_analyzer_triggered", False)),
+            "result": existing_job_diag.get("profile_analyzer_result") or existing_result,
+            "reason": existing_job_diag.get("profile_analyzer_reason") or existing_reason,
+            "provider": existing_job_diag.get("profile_analyzer_provider") or AI_ANALYZER_PROVIDER,
+            "model": existing_job_diag.get("profile_analyzer_model") or AI_ANALYZER_MODEL,
+            "profile_name": existing_job_diag.get("profile_selected_after_analyzer"),
+        }
+    if (not force) and existing_result == "skipped" and existing_reason in {"disabled"}:
+        return {
+            "triggered": bool(existing_job_diag.get("profile_analyzer_triggered", False)),
+            "result": existing_job_diag.get("profile_analyzer_result") or "skipped",
+            "reason": existing_job_diag.get("profile_analyzer_reason") or existing_reason,
+            "provider": existing_job_diag.get("profile_analyzer_provider") or AI_ANALYZER_PROVIDER,
+            "model": existing_job_diag.get("profile_analyzer_model") or AI_ANALYZER_MODEL,
+            "profile_name": existing_job_diag.get("profile_selected_after_analyzer"),
+        }
+
+    analyzer_meta = {
+        "triggered": False,
+        "result": "skipped",
+        "reason": "disabled",
+        "provider": AI_ANALYZER_PROVIDER,
+        "model": AI_ANALYZER_MODEL,
+        "profile_name": None,
+    }
+    if not AI_ANALYZER_ENABLED:
+        _persist_job_analyzer_meta(job_id, analyzer_meta)
+        return analyzer_meta
+
+    candidate_layouts = []
+    if isinstance(layout_pages, list):
+        candidate_layouts = [p for p in layout_pages if isinstance(p, dict)]
+    if not candidate_layouts and allow_ocr_fallback:
+        candidate_layouts = _build_layout_pages_from_ocr(job_dir, AI_ANALYZER_SAMPLE_PAGES)
+
+    sample_profiles = _sample_detected_profiles(candidate_layouts, AI_ANALYZER_SAMPLE_PAGES)
+
+    if sample_profiles and all(name == "GENERIC" for name in sample_profiles):
+        analyzer_meta = analyze_unknown_bank_and_apply(
+            layout_pages=candidate_layouts,
+            sample_pages=AI_ANALYZER_SAMPLE_PAGES,
+            min_rows=AI_ANALYZER_MIN_ROWS,
+            min_date_ratio=AI_ANALYZER_MIN_DATE_RATIO,
+            min_balance_ratio=AI_ANALYZER_MIN_BAL_RATIO,
+        )
+    elif sample_profiles:
+        analyzer_meta = {
+            **analyzer_meta,
+            "triggered": True,
+            "result": "matched",
+            "reason": "matched_existing_profile",
+            "profile_name": sample_profiles[0],
+        }
+    else:
+        analyzer_meta = {
+            **analyzer_meta,
+            "triggered": True,
+            "result": "skipped",
+            "reason": "no_ocr_profiles_sampled",
+        }
+
+    _persist_job_analyzer_meta(job_id, analyzer_meta)
+    return analyzer_meta
+
+
+def _get_submission_job_dir(submission: Submission) -> str | None:
+    if not submission.current_job_id:
+        return None
+    return os.path.join(DATA_DIR, "jobs", str(submission.current_job_id))
+
+
+def _discover_job_page_keys(job_dir: str) -> List[str]:
+    page_keys: set[str] = set()
+    status = _read_json_if_exists(os.path.join(job_dir, "status.json"), {})
+    total_pages = int((status or {}).get("pages") or 0)
+    if total_pages > 0:
+        for idx in range(1, total_pages + 1):
+            page_keys.add(f"page_{idx:03d}")
+
+    parsed = _read_json_if_exists(os.path.join(job_dir, "result", "parsed_rows.json"), {})
+    if isinstance(parsed, dict):
+        page_keys.update(str(k) for k in parsed.keys())
+
+    diagnostics = _read_json_if_exists(os.path.join(job_dir, "result", "parse_diagnostics.json"), {})
+    diag_pages = (diagnostics or {}).get("pages", {}) if isinstance(diagnostics, dict) else {}
+    if isinstance(diag_pages, dict):
+        page_keys.update(str(k) for k in diag_pages.keys())
+
+    cleaned_dir = os.path.join(job_dir, "cleaned")
+    if os.path.isdir(cleaned_dir):
+        for name in os.listdir(cleaned_dir):
+            if name.endswith(".png"):
+                page_keys.add(name.replace(".png", ""))
+
+    return sorted({k for k in page_keys if str(k).startswith("page_")})
 
 
 class LoginRequest(BaseModel):
@@ -364,6 +762,7 @@ def admin_clear_submissions(user: AuthUser = Depends(require_role("admin"))):
         counts = {
             "submissions": int(db.scalar(select(func.count()).select_from(Submission)) or 0),
             "jobs": int(db.scalar(select(func.count()).select_from(JobRecord)) or 0),
+            "submission_pages": int(db.scalar(select(func.count()).select_from(SubmissionPage)) or 0),
             "transactions": int(db.scalar(select(func.count()).select_from(Transaction)) or 0),
             "reports": int(db.scalar(select(func.count()).select_from(Report)) or 0),
             "audit_log": int(db.scalar(select(func.count()).select_from(AuditLog)) or 0),
@@ -371,6 +770,7 @@ def admin_clear_submissions(user: AuthUser = Depends(require_role("admin"))):
         db.execute(delete(AuditLog))
         db.execute(delete(Report))
         db.execute(delete(Transaction))
+        db.execute(delete(SubmissionPage))
         db.execute(delete(JobRecord))
         db.execute(delete(Submission))
         db.commit()
@@ -539,7 +939,7 @@ def start_job_from_draft(job_id: uuid.UUID, user: AuthUser = Depends(get_current
         except Exception:
             current_status = ""
 
-    if current_status in {"queued", "processing"}:
+    if current_status in {"queued", "processing", "done"}:
         return {"job_id": job_id_str, "started": False, "parse_mode": parse_mode}
 
     with open(status_path, "w") as f:
@@ -576,6 +976,22 @@ class EvaluatorTransactionRow(BaseModel):
 
 class EvaluatorTransactionsPatch(BaseModel):
     rows: List[EvaluatorTransactionRow]
+
+
+class EvaluatorGuideColumn(BaseModel):
+    key: str
+    width: float
+
+
+class EvaluatorGuideState(BaseModel):
+    column_layout: List[EvaluatorGuideColumn] = Field(default_factory=list)
+    horizontal: List[float] = Field(default_factory=list)
+
+
+class EvaluatorPageTransactionsPatch(BaseModel):
+    rows: List[EvaluatorTransactionRow]
+    expected_updated_at: Optional[str] = None
+    guide_state: Optional[EvaluatorGuideState] = None
 
 
 @app.post("/agent/submissions")
@@ -704,18 +1120,10 @@ def evaluator_get_submission(submission_id: uuid.UUID, user: AuthUser = Depends(
         diagnostics_path = os.path.join(job_dir, "result", "parse_diagnostics.json")
         parsed_path = os.path.join(job_dir, "result", "parsed_rows.json")
         bounds_path = os.path.join(job_dir, "result", "bounds.json")
-        if os.path.exists(status_path):
-            with open(status_path) as f:
-                job_payload = json.load(f)
-        if os.path.exists(diagnostics_path):
-            with open(diagnostics_path) as f:
-                diagnostics = json.load(f)
-        if os.path.exists(parsed_path):
-            with open(parsed_path) as f:
-                parsed = json.load(f)
-        if os.path.exists(bounds_path):
-            with open(bounds_path) as f:
-                bounds = json.load(f)
+        job_payload = _read_json_if_exists(status_path, None)
+        diagnostics = _read_json_if_exists(diagnostics_path, None)
+        parsed = _read_json_if_exists(parsed_path, None)
+        bounds = _read_json_if_exists(bounds_path, None)
 
     return {
         "submission": serialize_submission(sub),
@@ -725,7 +1133,280 @@ def evaluator_get_submission(submission_id: uuid.UUID, user: AuthUser = Depends(
         "diagnostics": diagnostics,
         "parsed": parsed,
         "bounds": bounds,
+        "review_status": get_submission_review_status(sub.id, user),
     }
+
+
+@app.get("/evaluator/submissions/{submission_id}/pages")
+def evaluator_list_submission_pages(submission_id: uuid.UUID, user: AuthUser = Depends(require_role("credit_evaluator"))):
+    try:
+        sub = get_submission_for_user(submission_id, user)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="submission_not_found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="forbidden_submission")
+    if sub.assigned_evaluator_id != user.id:
+        raise HTTPException(status_code=403, detail="submission_not_assigned")
+
+    job_dir = _get_submission_job_dir(sub)
+    if job_dir and os.path.exists(job_dir):
+        page_keys = _discover_job_page_keys(job_dir)
+        if page_keys:
+            max_idx = 0
+            for page_key in page_keys:
+                try:
+                    max_idx = max(max_idx, int(page_key.replace("page_", "")))
+                except Exception:
+                    continue
+            if max_idx > 0:
+                ensure_submission_pages(sub.id, max_idx, sub.current_job_id)
+        parsed_map = _read_json_if_exists(os.path.join(job_dir, "result", "parsed_rows.json"), {})
+        diagnostics = _read_json_if_exists(os.path.join(job_dir, "result", "parse_diagnostics.json"), {})
+        diag_pages = diagnostics.get("pages", {}) if isinstance(diagnostics, dict) else {}
+        status_payload = _read_json_if_exists(os.path.join(job_dir, "status.json"), {})
+        status_name = str((status_payload or {}).get("status") or "").lower()
+        for key in page_keys:
+            rows = (parsed_map or {}).get(key) or []
+            diag = (diag_pages or {}).get(key) or {}
+            if rows:
+                set_page_parse_status(sub.id, key, "done")
+            elif diag:
+                if str(diag.get("source_type") or "") == "none":
+                    set_page_parse_status(sub.id, key, "failed", str(diag.get("fallback_reason") or "parse_failed"))
+                else:
+                    set_page_parse_status(sub.id, key, "done")
+            elif status_name in {"queued", "processing"}:
+                set_page_parse_status(sub.id, key, "processing")
+            else:
+                set_page_parse_status(sub.id, key, "pending")
+
+    try:
+        return list_submission_pages(sub.id, user)
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="forbidden_submission")
+
+
+@app.get("/evaluator/submissions/{submission_id}/pages/{page_key}")
+def evaluator_get_submission_page(
+    submission_id: uuid.UUID,
+    page_key: str,
+    user: AuthUser = Depends(require_role("credit_evaluator")),
+):
+    try:
+        sub = get_submission_for_user(submission_id, user)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="submission_not_found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="forbidden_submission")
+    if sub.assigned_evaluator_id != user.id:
+        raise HTTPException(status_code=403, detail="submission_not_assigned")
+
+    key = page_key if str(page_key).startswith("page_") else f"page_{str(page_key).zfill(3)}"
+    job_dir = _get_submission_job_dir(sub)
+    parsed_page_rows = []
+    bounds_page = []
+    diag_page = {}
+    identity_bounds = []
+    if job_dir:
+        parsed_map = _read_json_if_exists(os.path.join(job_dir, "result", "parsed_rows.json"), {})
+        bounds_map = _read_json_if_exists(os.path.join(job_dir, "result", "bounds.json"), {})
+        diagnostics = _read_json_if_exists(os.path.join(job_dir, "result", "parse_diagnostics.json"), {})
+        parsed_page_rows = (parsed_map or {}).get(key) or []
+        bounds_page = (bounds_map or {}).get(key) or []
+        diag_page = ((diagnostics or {}).get("pages") or {}).get(key) or {}
+        job_diag = (diagnostics or {}).get("job") or {}
+        for b in (job_diag.get("account_name_bbox"), job_diag.get("account_number_bbox")):
+            if isinstance(b, dict) and b.get("page") == key:
+                identity_bounds.append(b)
+
+    try:
+        page_data = get_submission_page(sub.id, key, user)
+    except ValueError as exc:
+        if str(exc) != "page_not_found":
+            raise HTTPException(status_code=404, detail=str(exc))
+        page_data = {"page_status": None, "rows": []}
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="forbidden_submission")
+
+    page_rows = []
+    db_rows = page_data.get("rows") or []
+    if db_rows:
+        for row in db_rows:
+            row_index = int(row.get("row_index") or 0)
+            page_rows.append(
+                {
+                    "row_id": str(row.get("row_id") or f"{row_index:03d}"),
+                    "page": key,
+                    "date": row.get("date") or "",
+                    "description": row.get("description") or "",
+                    "debit": "" if row.get("debit") is None else str(row.get("debit")),
+                    "credit": "" if row.get("credit") is None else str(row.get("credit")),
+                    "balance": "" if row.get("balance") is None else str(row.get("balance")),
+                    "x1": row.get("x1"),
+                    "y1": row.get("y1"),
+                    "x2": row.get("x2"),
+                    "y2": row.get("y2"),
+                }
+            )
+    else:
+        for row in parsed_page_rows:
+            row_id = str(row.get("row_id") or "")
+            row_bounds = next((b for b in bounds_page if str(b.get("row_id") or "") == row_id), {})
+            page_rows.append(
+                {
+                    "row_id": row_id or "",
+                    "page": key,
+                    "date": row.get("date") or "",
+                    "description": row.get("description") or "",
+                    "debit": row.get("debit") or "",
+                    "credit": row.get("credit") or "",
+                    "balance": row.get("balance") or "",
+                    "x1": row_bounds.get("x1"),
+                    "y1": row_bounds.get("y1"),
+                    "x2": row_bounds.get("x2"),
+                    "y2": row_bounds.get("y2"),
+                }
+            )
+
+    page_status = page_data.get("page_status") or {
+        "page_key": key,
+        "index": int(str(key).replace("page_", "")) if str(key).replace("page_", "").isdigit() else 0,
+        "parse_status": "pending",
+        "review_status": "pending",
+        "saved_at": None,
+        "rows_count": len(page_rows),
+        "has_unsaved": False,
+        "updated_at": None,
+    }
+
+    return {
+        "rows": page_rows,
+        "bounds": bounds_page,
+        "identity_bounds": identity_bounds,
+        "parse_diagnostics_page": diag_page,
+        "page_status": page_status,
+        "guide_state": _read_page_editor_state(sub, key),
+    }
+
+
+@app.patch("/evaluator/submissions/{submission_id}/pages/{page_key}/transactions")
+def evaluator_patch_page_transactions(
+    submission_id: uuid.UUID,
+    page_key: str,
+    payload: EvaluatorPageTransactionsPatch,
+    user: AuthUser = Depends(require_role("credit_evaluator")),
+):
+    try:
+        sub = get_submission_for_user(submission_id, user)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="submission_not_found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="forbidden_submission")
+    if sub.assigned_evaluator_id != user.id:
+        raise HTTPException(status_code=403, detail="submission_not_assigned")
+
+    key = page_key if str(page_key).startswith("page_") else f"page_{str(page_key).zfill(3)}"
+    if payload.expected_updated_at:
+        try:
+            page_data = get_submission_page(submission_id, key, user)
+            saved_at = str((page_data.get("page_status") or {}).get("saved_at") or "")
+            if saved_at and saved_at != payload.expected_updated_at:
+                raise HTTPException(status_code=409, detail="page_conflict_reload")
+        except ValueError as exc:
+            if str(exc) != "page_not_found":
+                raise HTTPException(status_code=404, detail=str(exc))
+    try:
+        result = persist_page_transactions(
+            submission_id=submission_id,
+            page_key=key,
+            evaluator_user=user,
+            rows=[r.model_dump() for r in payload.rows],
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        code = 404 if detail == "submission_not_found" else 400
+        raise HTTPException(status_code=code, detail=detail)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if payload.guide_state is not None:
+        try:
+            _write_page_editor_state(sub, key, payload.guide_state.model_dump())
+        except Exception as exc:
+            logger.warning(
+                "Failed to persist page editor state for submission=%s page=%s",
+                str(submission_id),
+                key,
+                exc_info=exc,
+            )
+            raise HTTPException(status_code=500, detail="failed_to_persist_guide_state")
+    return {"ok": True, **result}
+
+
+@app.post("/evaluator/submissions/{submission_id}/pages/{page_key}/parse")
+def evaluator_parse_single_page(
+    submission_id: uuid.UUID,
+    page_key: str,
+    user: AuthUser = Depends(require_role("credit_evaluator")),
+):
+    try:
+        sub = get_submission_for_user(submission_id, user)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="submission_not_found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="forbidden_submission")
+    if sub.assigned_evaluator_id != user.id:
+        raise HTTPException(status_code=403, detail="submission_not_assigned")
+    if not sub.current_job_id:
+        raise HTTPException(status_code=400, detail="submission_has_no_job")
+    key = page_key if str(page_key).startswith("page_") else f"page_{str(page_key).zfill(3)}"
+    set_page_parse_status(sub.id, key, "processing")
+    try:
+        _reparse_single_page(str(sub.current_job_id), key)
+    except HTTPException:
+        set_page_parse_status(sub.id, key, "failed", "reparse_failed")
+        raise
+    except Exception as exc:
+        set_page_parse_status(sub.id, key, "failed", str(exc))
+        raise HTTPException(status_code=500, detail="reparse_failed")
+    set_page_parse_status(sub.id, key, "done")
+    return {"ok": True, "page_key": key}
+
+
+@app.post("/evaluator/submissions/{submission_id}/pages/{page_key}/review-complete")
+def evaluator_review_complete(
+    submission_id: uuid.UUID,
+    page_key: str,
+    user: AuthUser = Depends(require_role("credit_evaluator")),
+):
+    try:
+        result = mark_page_reviewed(submission_id, page_key, user)
+    except ValueError as exc:
+        detail = str(exc)
+        code = 404 if detail in {"submission_not_found", "page_not_found"} else 400
+        raise HTTPException(status_code=code, detail=detail)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    return {"ok": True, **result}
+
+
+@app.get("/evaluator/submissions/{submission_id}/review-status")
+def evaluator_review_status(submission_id: uuid.UUID, user: AuthUser = Depends(require_role("credit_evaluator"))):
+    try:
+        return get_submission_review_status(submission_id, user)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+
+@app.post("/evaluator/submissions/{submission_id}/finish-review")
+def evaluator_finish_review(submission_id: uuid.UUID, user: AuthUser = Depends(require_role("credit_evaluator"))):
+    try:
+        return finish_review_and_build_summary(submission_id, user)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
 
 
 @app.patch("/evaluator/submissions/{submission_id}/transactions")
@@ -784,6 +1465,11 @@ def evaluator_generate_report(submission_id: uuid.UUID, user: AuthUser = Depends
         raise HTTPException(status_code=403, detail="forbidden_submission")
     if sub.assigned_evaluator_id != user.id:
         raise HTTPException(status_code=403, detail="submission_not_assigned")
+    try:
+        if not can_generate_exports(sub.id, user):
+            raise HTTPException(status_code=409, detail="review_incomplete")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="submission_not_assigned")
 
     rows = [serialize_transaction(t) for t in get_transactions_for_submission(sub.id)]
     summary = sub.summary_snapshot_json or compute_summary(rows)
@@ -798,6 +1484,21 @@ def evaluator_generate_report(submission_id: uuid.UUID, user: AuthUser = Depends
         "blob_key": blob_key,
         "download_url": f"/evaluator/reports/{report.id}/download",
     }
+
+
+@app.post("/evaluator/submissions/{submission_id}/export-excel")
+def evaluator_export_excel_gate(submission_id: uuid.UUID, user: AuthUser = Depends(require_role("credit_evaluator"))):
+    try:
+        sub = get_submission_for_user(submission_id, user)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="submission_not_found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="forbidden_submission")
+    if sub.assigned_evaluator_id != user.id:
+        raise HTTPException(status_code=403, detail="submission_not_assigned")
+    if not can_generate_exports(sub.id, user):
+        raise HTTPException(status_code=409, detail="review_incomplete")
+    return {"ok": True, "submission_id": str(sub.id)}
 
 
 @app.get("/evaluator/reports/{report_id}/download")
@@ -824,7 +1525,7 @@ def evaluator_mark_summary_ready(submission_id: uuid.UUID, user: AuthUser = Depe
         sub = set_submission_summary_ready(submission_id, user)
     except ValueError as exc:
         detail = str(exc)
-        code = 404 if detail == "submission_not_found" else 400
+        code = 404 if detail == "submission_not_found" else (409 if detail == "review_incomplete" else 400)
         raise HTTPException(status_code=code, detail=detail)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
@@ -837,7 +1538,7 @@ def evaluator_mark_summary_generated(submission_id: uuid.UUID, user: AuthUser = 
         sub = set_submission_summary_generated(submission_id, user)
     except ValueError as exc:
         detail = str(exc)
-        code = 404 if detail == "submission_not_found" else 400
+        code = 404 if detail == "submission_not_found" else (409 if detail == "review_incomplete" else 400)
         raise HTTPException(status_code=code, detail=detail)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
@@ -854,15 +1555,84 @@ def job_status(job_id: uuid.UUID, user: AuthUser = Depends(get_current_user)):
     job_id_str = str(job_id)
     status_path = os.path.join(DATA_DIR, "jobs", job_id_str, "status.json")
 
-    if not os.path.exists(status_path):
-        raise HTTPException(status_code=404, detail="Job not found")
+    db_payload = {
+        "status": str(job.status or "queued"),
+        "step": str(job.step or job.status or "queued"),
+        "progress": max(0, min(100, _coerce_progress(job.progress, 0))),
+    }
+    if job.parse_mode:
+        db_payload["parse_mode"] = job.parse_mode
+    if job.ocr_backend:
+        db_payload["ocr_backend"] = job.ocr_backend
 
+    if not os.path.exists(status_path):
+        return db_payload
+
+    payload = None
     try:
         with open(status_path) as f:
-            return json.load(f)
+            payload = json.load(f)
     except json.JSONDecodeError:
-        # Status file mid-write
-        return {"status": "processing", "step": "processing", "progress": 0}
+        payload = {}
+    except Exception as exc:
+        logger.warning("Failed to read status file for job %s", job_id_str, exc_info=exc)
+        payload = {}
+
+    if not isinstance(payload, dict):
+        payload = {}
+
+    file_status = str(payload.get("status") or "").strip().lower()
+    db_status = str(db_payload.get("status") or "").strip().lower()
+    file_progress = _coerce_progress(payload.get("progress"), 0)
+    db_progress = _coerce_progress(db_payload.get("progress"), 0)
+
+    # Prefer DB truth for terminal states to avoid stale in-flight status files.
+    if db_status in {"done", "failed"} and file_status not in {"done", "failed"}:
+        payload["status"] = db_payload["status"]
+        payload["step"] = db_payload["step"]
+        payload["progress"] = max(file_progress, db_progress)
+    else:
+        payload["progress"] = max(file_progress, db_progress if db_status == "done" else 0)
+        if not payload.get("status"):
+            payload["status"] = db_payload["status"]
+        if not payload.get("step"):
+            payload["step"] = db_payload["step"]
+
+    if "parse_mode" not in payload and db_payload.get("parse_mode"):
+        payload["parse_mode"] = db_payload["parse_mode"]
+    if "ocr_backend" not in payload and db_payload.get("ocr_backend"):
+        payload["ocr_backend"] = db_payload["ocr_backend"]
+
+    # Reconcile stale "processing" states for text mode.
+    parse_mode = _normalize_parse_mode(payload.get("parse_mode"))
+    if file_status in {"processing", "queued"} and parse_mode == "text":
+        expected_pages = _coerce_progress(payload.get("pages"), 0)
+        parsed_rows_path = os.path.join(DATA_DIR, "jobs", job_id_str, "result", "parsed_rows.json")
+        parsed_pages = 0
+        if os.path.exists(parsed_rows_path):
+            try:
+                parsed_map = _read_json_if_exists(parsed_rows_path, {})
+                if isinstance(parsed_map, dict):
+                    parsed_pages = len(parsed_map.keys())
+            except Exception:
+                parsed_pages = 0
+        if expected_pages > 0 and parsed_pages >= expected_pages:
+            payload["status"] = "done"
+            payload["step"] = "completed"
+            payload["progress"] = 100
+        else:
+            try:
+                status_age = max(0, int(time.time() - os.path.getmtime(status_path)))
+            except Exception:
+                status_age = 0
+            if status_age >= max(30, TEXT_STALE_SECONDS):
+                payload["status"] = "failed"
+                payload["step"] = "failed"
+                payload["message"] = "processing_stale_timeout"
+                payload["stale_seconds"] = status_age
+
+    payload["progress"] = max(0, min(100, _coerce_progress(payload.get("progress"), 0)))
+    return payload
 
 
 # ---------------------------
@@ -1098,6 +1868,112 @@ class FlattenRequest(BaseModel):
     points: List[FlattenPoint]
 
 
+class SectionBounds(BaseModel):
+    x1: float = Field(ge=0.0, le=1.0)
+    y1: float = Field(ge=0.0, le=1.0)
+    x2: float = Field(ge=0.0, le=1.0)
+    y2: float = Field(ge=0.0, le=1.0)
+
+
+class SectionOcrRequest(BaseModel):
+    sections: List[SectionBounds]
+    guide_state: Optional[EvaluatorGuideState] = None
+
+class ImageToolRequest(BaseModel):
+    tool: str = Field(min_length=1, max_length=32)
+
+
+IMAGE_TOOLS = {
+    "deskew",
+    "contrast",
+    "binarize",
+    "denoise",
+    "sharpen",
+    "remove_lines",
+    "reset",
+}
+
+
+def _normalize_page_name(page: str) -> str:
+    value = str(page or "").strip()
+    return value if value.startswith("page_") else f"page_{value.zfill(3)}"
+
+
+def _deskew_grayscale(gray: np.ndarray) -> np.ndarray:
+    try:
+        inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+        coords = np.column_stack(np.where(inv > 0))
+        if coords.size == 0:
+            return gray
+        angle = float(cv2.minAreaRect(coords.astype(np.float32))[-1])
+        if angle < -45.0:
+            angle = -(90.0 + angle)
+        else:
+            angle = -angle
+        if abs(angle) < 0.05:
+            return gray
+        h, w = gray.shape[:2]
+        matrix = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
+        return cv2.warpAffine(
+            gray,
+            matrix,
+            (w, h),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+    except Exception:
+        return gray
+
+
+def _remove_grid_lines(gray: np.ndarray) -> np.ndarray:
+    h, w = gray.shape[:2]
+    if h <= 0 or w <= 0:
+        return gray
+
+    inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(20, w // 28), 1))
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(20, h // 28)))
+    h_lines = cv2.morphologyEx(inv, cv2.MORPH_OPEN, h_kernel)
+    v_lines = cv2.morphologyEx(inv, cv2.MORPH_OPEN, v_kernel)
+    lines = cv2.bitwise_or(h_lines, v_lines)
+    if cv2.countNonZero(lines) == 0:
+        return gray
+    return cv2.inpaint(gray, lines, 3, cv2.INPAINT_TELEA)
+
+
+def _apply_image_tool(img_bgr: np.ndarray, tool: str) -> np.ndarray:
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    if tool == "deskew":
+        return _deskew_grayscale(gray)
+
+    if tool == "contrast":
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        return clahe.apply(gray)
+
+    if tool == "binarize":
+        return cv2.adaptiveThreshold(
+            gray,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            11,
+        )
+
+    if tool == "denoise":
+        return cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
+
+    if tool == "sharpen":
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+        return cv2.filter2D(gray, -1, kernel)
+
+    if tool == "remove_lines":
+        return _remove_grid_lines(gray)
+
+    raise HTTPException(status_code=400, detail="unsupported_image_tool")
+
+
 @app.post("/jobs/{job_id}/pages/{page}/flatten")
 def flatten_page(job_id: uuid.UUID, page: str, payload: FlattenRequest, user: AuthUser = Depends(get_current_user)):
     job = _get_job_record_or_404(job_id)
@@ -1140,6 +2016,442 @@ def reset_flatten_page(job_id: uuid.UUID, page: str, user: AuthUser = Depends(ge
     if _should_reparse_after_page_edit(job_id_str):
         _reparse_single_page(job_id_str, page)
     return {"ok": True, "page": page}
+
+
+@app.post("/jobs/{job_id}/pages/{page}/image-tool")
+def apply_image_tool(
+    job_id: uuid.UUID,
+    page: str,
+    payload: ImageToolRequest,
+    user: AuthUser = Depends(get_current_user),
+):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=True)
+
+    tool = str(payload.tool or "").strip().lower()
+    if tool not in IMAGE_TOOLS:
+        raise HTTPException(status_code=400, detail="unsupported_image_tool")
+
+    job_id_str = str(job_id)
+    page_name = _normalize_page_name(page)
+    job_dir = os.path.join(DATA_DIR, "jobs", job_id_str)
+    cleaned_dir = os.path.join(job_dir, "cleaned")
+    cleaned_path = os.path.join(cleaned_dir, f"{page_name}.png")
+    source_path = _resolve_job_page_image_path(job_id_str, page_name, prefer_cleaned=False)
+
+    if not source_path and not os.path.exists(cleaned_path):
+        raise HTTPException(status_code=404, detail="page_image_not_found")
+
+    os.makedirs(cleaned_dir, exist_ok=True)
+
+    if tool == "reset":
+        if not source_path:
+            raise HTTPException(status_code=404, detail="original_page_not_found")
+        reset_img = clean_page(source_path)
+        cv2.imwrite(cleaned_path, reset_img)
+    else:
+        if not os.path.exists(cleaned_path):
+            if not source_path:
+                raise HTTPException(status_code=404, detail="page_image_not_found")
+            seeded = clean_page(source_path)
+            cv2.imwrite(cleaned_path, seeded)
+
+        img = cv2.imread(cleaned_path)
+        if img is None:
+            raise HTTPException(status_code=400, detail="unable_to_read_page_image")
+
+        processed = _apply_image_tool(img, tool)
+        cv2.imwrite(cleaned_path, processed)
+
+    if _should_reparse_after_page_edit(job_id_str):
+        _reparse_single_page(job_id_str, page_name)
+
+    return {"ok": True, "page": page_name, "tool": tool}
+
+
+def _resolve_job_page_image_path(job_id: str, page: str, prefer_cleaned: bool = True) -> Optional[str]:
+    page_name = page if str(page).startswith("page_") else f"page_{str(page).zfill(3)}"
+    filename = f"{page_name}.png"
+    job_dir = os.path.join(DATA_DIR, "jobs", job_id)
+
+    cleaned_path = os.path.join(job_dir, "cleaned", filename)
+    if prefer_cleaned and os.path.exists(cleaned_path):
+        return cleaned_path
+
+    raw_path = os.path.join(job_dir, "pages", filename)
+    if os.path.exists(raw_path):
+        return raw_path
+
+    preview_dir = os.path.join(job_dir, "preview")
+    preview_path = os.path.join(preview_dir, filename)
+    if os.path.exists(preview_path):
+        return preview_path
+
+    if _generate_preview_page_if_missing(job_id, filename, preview_path):
+        return preview_path
+
+    return None
+
+
+def _ocr_section_text_tesseract(section_bgr: np.ndarray, x_offset: int = 0, y_offset: int = 0) -> Dict:
+    if section_bgr is None or section_bgr.size == 0:
+        return {"text": "", "word_count": 0, "confidence": None, "words": []}
+
+    gray = cv2.cvtColor(section_bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    config = "--oem 1 --psm 6 -c preserve_interword_spaces=1"
+
+    data = pytesseract.image_to_data(
+        binary,
+        output_type=pytesseract.Output.DICT,
+        config=config,
+        lang="eng",
+    )
+    words: List[str] = []
+    word_boxes: List[Dict] = []
+    confs: List[float] = []
+    n = len(data.get("text", []))
+    for i in range(n):
+        text = str(data["text"][i] or "").strip()
+        if not text:
+            continue
+        words.append(text)
+
+        try:
+            left = int(data.get("left", [0])[i])
+            top = int(data.get("top", [0])[i])
+            width = int(data.get("width", [0])[i])
+            height = int(data.get("height", [0])[i])
+        except Exception:
+            left = 0
+            top = 0
+            width = 0
+            height = 0
+        if width > 0 and height > 0:
+            x1 = float(max(0, x_offset + left))
+            y1 = float(max(0, y_offset + top))
+            x2 = float(max(x1 + 1.0, x_offset + left + width))
+            y2 = float(max(y1 + 1.0, y_offset + top + height))
+            word_boxes.append(
+                {
+                    "text": text,
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                }
+            )
+
+        conf_raw = data.get("conf", ["-1"])[i]
+        try:
+            conf = float(conf_raw)
+        except Exception:
+            conf = -1.0
+        if conf >= 0:
+            confs.append(conf)
+
+    text_out = " ".join(words).strip()
+    if not text_out:
+        fallback = pytesseract.image_to_string(binary, config=config, lang="eng")
+        text_out = " ".join(str(fallback or "").split())
+
+    avg_conf = round((sum(confs) / len(confs)) / 100.0, 4) if confs else None
+    return {
+        "text": text_out,
+        "word_count": len(words),
+        "confidence": avg_conf,
+        "words": word_boxes,
+    }
+
+
+def _build_guided_rows_from_sections(sections_out: List[Dict], guide_state: Optional["EvaluatorGuideState"]) -> List[Dict]:
+    if not sections_out:
+        return []
+    role_order = []
+    if guide_state and isinstance(guide_state.column_layout, list):
+        for col in guide_state.column_layout:
+            key = str(getattr(col, "key", "") or "").strip().lower()
+            if key in {"date", "description", "debit", "credit", "balance"}:
+                role_order.append(key)
+    if not role_order:
+        role_order = ["date", "description", "debit", "credit", "balance"]
+
+    by_row: Dict[str, List[Dict]] = {}
+    for sec in sections_out:
+        y1 = float(sec.get("y1") or 0.0)
+        y2 = float(sec.get("y2") or 0.0)
+        row_key = f"{round(y1, 6)}:{round(y2, 6)}"
+        by_row.setdefault(row_key, []).append(sec)
+
+    rows: List[Dict] = []
+    row_index = 1
+    for row_key in sorted(by_row.keys(), key=lambda key: float(key.split(":")[0])):
+        cells = sorted(by_row[row_key], key=lambda c: float(c.get("x1") or 0.0))
+        row = {
+            "row_id": f"{row_index:03}",
+            "date": "",
+            "description": "",
+            "debit": "",
+            "credit": "",
+            "balance": "",
+            "x1": min(float(c.get("x1") or 0.0) for c in cells),
+            "y1": min(float(c.get("y1") or 0.0) for c in cells),
+            "x2": max(float(c.get("x2") or 0.0) for c in cells),
+            "y2": max(float(c.get("y2") or 0.0) for c in cells),
+        }
+        for idx, cell in enumerate(cells):
+            text = str(cell.get("text") or "").strip()
+            if not text:
+                continue
+            role = role_order[idx] if idx < len(role_order) else "description"
+            if role == "description":
+                row["description"] = f"{row['description']} {text}".strip()
+            elif role == "date":
+                if not row["date"]:
+                    row["date"] = text
+            elif role == "debit":
+                if not row["debit"]:
+                    row["debit"] = text
+            elif role == "credit":
+                if not row["credit"]:
+                    row["credit"] = text
+            elif role == "balance":
+                if not row["balance"]:
+                    row["balance"] = text
+        combined = " ".join([row["date"], row["description"], row["debit"], row["credit"], row["balance"]]).lower()
+        header_hits = 0
+        if "date" in combined:
+            header_hits += 1
+        if "description" in combined or "particular" in combined:
+            header_hits += 1
+        if "debit" in combined or "credit" in combined or "balance" in combined:
+            header_hits += 1
+        if header_hits >= 2:
+            continue
+        if any(str(row.get(k) or "").strip() for k in ("date", "description", "debit", "credit", "balance")):
+            rows.append(row)
+            row_index += 1
+    return rows
+
+
+def _normalize_guided_rows(rows: List[Dict], page_name: str) -> tuple[List[Dict], List[Dict]]:
+    out_rows: List[Dict] = []
+    out_bounds: List[Dict] = []
+    for idx, row in enumerate(rows, start=1):
+        date_text = str(row.get("date") or "").strip()
+        desc_text = str(row.get("description") or "").strip()
+        debit_text = str(row.get("debit") or "").strip()
+        credit_text = str(row.get("credit") or "").strip()
+        bal_text = str(row.get("balance") or "").strip()
+        date_iso = normalize_date(date_text, ["mdy", "dmy", "ymd"]) if date_text else None
+        debit = normalize_amount(debit_text) if debit_text else None
+        credit = normalize_amount(credit_text) if credit_text else None
+        balance = normalize_amount(bal_text) if bal_text else None
+        # Keep rows with at least date+balance or any debit/credit amount.
+        if not ((date_iso and balance) or debit or credit):
+            continue
+        row_id = f"{idx:03}"
+        out_rows.append(
+            {
+                "row_id": row_id,
+                "page": page_name,
+                "date": date_iso or date_text,
+                "description": desc_text,
+                "debit": debit or "",
+                "credit": credit or "",
+                "balance": balance or "",
+            }
+        )
+        out_bounds.append(
+            {
+                "row_id": row_id,
+                "x1": row.get("x1"),
+                "y1": row.get("y1"),
+                "x2": row.get("x2"),
+                "y2": row.get("y2"),
+            }
+        )
+    return out_rows, out_bounds
+
+
+@app.post("/jobs/{job_id}/pages/{page}/ocr-sections")
+def ocr_page_sections(
+    job_id: uuid.UUID,
+    page: str,
+    payload: SectionOcrRequest,
+    user: AuthUser = Depends(get_current_user),
+):
+    job = _get_job_record_or_404(job_id)
+    _authorize_job_access(job, user, write=False)
+
+    if not payload.sections:
+        raise HTTPException(status_code=400, detail="sections_required")
+    if len(payload.sections) > 500:
+        raise HTTPException(status_code=400, detail="too_many_sections")
+
+    page_name = page if str(page).startswith("page_") else f"page_{str(page).zfill(3)}"
+    image_path = _resolve_job_page_image_path(str(job_id), page_name)
+    if not image_path:
+        raise HTTPException(status_code=404, detail="page_image_not_found")
+
+    image = cv2.imread(image_path)
+    if image is None:
+        raise HTTPException(status_code=400, detail="unable_to_read_page_image")
+
+    img_h, img_w = image.shape[:2]
+    sections_out = []
+    analyzer_words: List[Dict] = []
+
+    try:
+        for idx, sec in enumerate(payload.sections, start=1):
+            x1n = max(0.0, min(1.0, min(float(sec.x1), float(sec.x2))))
+            x2n = max(0.0, min(1.0, max(float(sec.x1), float(sec.x2))))
+            y1n = max(0.0, min(1.0, min(float(sec.y1), float(sec.y2))))
+            y2n = max(0.0, min(1.0, max(float(sec.y1), float(sec.y2))))
+
+            x1 = max(0, min(img_w - 1, int(math.floor(x1n * img_w))))
+            y1 = max(0, min(img_h - 1, int(math.floor(y1n * img_h))))
+            x2 = max(x1 + 1, min(img_w, int(math.ceil(x2n * img_w))))
+            y2 = max(y1 + 1, min(img_h, int(math.ceil(y2n * img_h))))
+
+            crop = image[y1:y2, x1:x2]
+            ocr = _ocr_section_text_tesseract(crop, x_offset=x1, y_offset=y1)
+            analyzer_words.extend(ocr.get("words", []))
+            sections_out.append(
+                {
+                    "index": idx,
+                    "x1": x1n,
+                    "y1": y1n,
+                    "x2": x2n,
+                    "y2": y2n,
+                    "pixel_bounds": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                    "text": ocr.get("text", ""),
+                    "word_count": ocr.get("word_count", 0),
+                    "confidence": ocr.get("confidence"),
+                }
+            )
+    except pytesseract.TesseractError as exc:
+        logger.warning("Section OCR failed for job %s page %s", str(job_id), page_name, exc_info=exc)
+        raise HTTPException(status_code=500, detail="tesseract_failed")
+
+    combined_text = "\n".join(str(item.get("text") or "").strip() for item in sections_out if str(item.get("text") or "").strip())
+    guided_rows_payload: List[Dict] = _build_guided_rows_from_sections(sections_out, payload.guide_state)
+    analyzer_meta = {
+        "triggered": False,
+        "result": "skipped",
+        "reason": "no_ocr_profiles_sampled",
+        "provider": AI_ANALYZER_PROVIDER,
+        "model": AI_ANALYZER_MODEL,
+        "profile_name": None,
+    }
+    parser_profile = detect_bank_profile(combined_text)
+    try:
+        analyzer_layout_pages = []
+        if combined_text or analyzer_words:
+            analyzer_layout_pages = [
+                {
+                    "text": combined_text,
+                    "words": analyzer_words,
+                    "width": float(max(img_w, 1)),
+                    "height": float(max(img_h, 1)),
+                }
+            ]
+        analyzer_meta = _run_ai_profile_analyzer_for_job(
+            str(job_id),
+            analyzer_layout_pages,
+            allow_ocr_fallback=False,
+            force=True,
+        )
+        needs_guided_retry = str(analyzer_meta.get("result") or "").lower() in {"failed", "rejected", "skipped"}
+        if needs_guided_retry and guided_rows_payload:
+            guided_meta = analyze_unknown_bank_and_apply_guided(
+                layout_pages=analyzer_layout_pages,
+                guided_payload={"rows": guided_rows_payload},
+                sample_pages=1,
+                min_rows=max(1, min(AI_ANALYZER_MIN_ROWS, 3)),
+                min_date_ratio=AI_ANALYZER_MIN_DATE_RATIO,
+                min_balance_ratio=AI_ANALYZER_MIN_BAL_RATIO,
+            )
+            if str(guided_meta.get("result") or "").lower() in {"applied", "matched"}:
+                analyzer_meta = guided_meta
+                _persist_job_analyzer_meta(str(job_id), analyzer_meta)
+        selected_name = str(analyzer_meta.get("profile_name") or "").strip()
+        if selected_name and selected_name in PROFILES:
+            parser_profile = PROFILES[selected_name]
+    except Exception as exc:
+        logger.warning("Deferred AI profile analyzer failed for job %s", str(job_id), exc_info=exc)
+
+    parsed_rows: List[Dict] = []
+    parsed_bounds: List[Dict] = []
+    parse_diag: Dict = {}
+    guided_rows: List[Dict] = []
+    guided_bounds: List[Dict] = []
+    try:
+        page_rows, page_bounds, parse_diag = parse_page_with_profile_fallback(
+            analyzer_words,
+            float(max(img_w, 1)),
+            float(max(img_h, 1)),
+            parser_profile,
+        )
+        tx_rows = [row for row in page_rows if is_transaction_row(row, parser_profile)]
+        id_map: Dict[str, str] = {}
+        for n, row in enumerate(tx_rows, start=1):
+            old_id = str(row.get("row_id") or "")
+            new_id = f"{n:03}"
+            row["row_id"] = new_id
+            id_map[old_id] = new_id
+            parsed_rows.append(
+                {
+                    "row_id": new_id,
+                    "page": page_name,
+                    "date": row.get("date") or "",
+                    "description": row.get("description") or "",
+                    "debit": row.get("debit") or "",
+                    "credit": row.get("credit") or "",
+                    "balance": row.get("balance") or "",
+                }
+            )
+        for b in page_bounds:
+            old_id = str(b.get("row_id") or "")
+            if old_id not in id_map:
+                continue
+            parsed_bounds.append(
+                {
+                    "row_id": id_map[old_id],
+                    "x1": b.get("x1"),
+                    "y1": b.get("y1"),
+                    "x2": b.get("x2"),
+                    "y2": b.get("y2"),
+                }
+            )
+        guided_rows, guided_bounds = _normalize_guided_rows(guided_rows_payload, page_name)
+        if len(guided_rows) > len(parsed_rows):
+            parsed_rows = guided_rows
+            parsed_bounds = guided_bounds
+            parse_diag = {
+                **(parse_diag or {}),
+                "source": "guided_sections",
+                "guided_rows_count": len(guided_rows),
+            }
+    except Exception as exc:
+        logger.warning("Section OCR parse failed for job %s page %s", str(job_id), page_name, exc_info=exc)
+        parsed_rows = []
+        parsed_bounds = []
+        parse_diag = {"error": "section_parse_failed"}
+
+    return {
+        "page": page_name,
+        "backend": "tesseract",
+        "section_count": len(sections_out),
+        "sections": sections_out,
+        "combined_text": combined_text,
+        "profile_detected": parser_profile.name if parser_profile else "GENERIC",
+        "parsed_rows": parsed_rows,
+        "parsed_bounds": parsed_bounds,
+        "parse_diagnostics_page": parse_diag,
+        "profile_analyzer": analyzer_meta,
+    }
 
 
 def _should_reparse_after_page_edit(job_id: str) -> bool:
