@@ -145,6 +145,7 @@ let activePageKey = '';
 let activePageReviewStatus = 'pending';
 let activePageUpdatedAt = null;
 let activePageDirty = false;
+let activePageDirtyRevision = 0;
 let activePageSaveInFlight = false;
 let activePageSavePromise = null;
 let activePageAutosaveTimer = null;
@@ -597,6 +598,7 @@ function scheduleActivePageAutosave() {
 function markActivePageDirty() {
   if (authRole === 'credit_evaluator' && evaluatorSelectedSubmission) {
     activePageDirty = true;
+    activePageDirtyRevision += 1;
     renderActivePageSavedMark();
     scheduleActivePageAutosave();
   }
@@ -1882,10 +1884,10 @@ function normalizeBorrowerNameForCompare(value) {
 }
 
 function getPageConcurrencyToken(pageStatus) {
-  const updated = String((pageStatus && pageStatus.updated_at) || '').trim();
-  if (updated) return updated;
   const saved = String((pageStatus && pageStatus.saved_at) || '').trim();
-  return saved || null;
+  if (saved) return saved;
+  const updated = String((pageStatus && pageStatus.updated_at) || '').trim();
+  return updated || null;
 }
 
 function pruneSelectedEvaluatorSubmissionIds() {
@@ -2493,6 +2495,7 @@ async function loadActivePage(pageKey) {
     activePageKey = key;
     activePageReviewStatus = 'pending';
     activePageDirty = false;
+    activePageDirtyRevision = 0;
     renderActivePageSavedMark();
     return;
   }
@@ -2504,6 +2507,7 @@ async function loadActivePage(pageKey) {
   activePageReviewStatus = body.page_status && body.page_status.review_status ? String(body.page_status.review_status) : 'pending';
   activePageKey = key;
   activePageDirty = false;
+  activePageDirtyRevision = 0;
   renderActivePageSavedMark();
   setActiveEditorRows(Array.isArray(body.rows) ? body.rows : [], key);
   renderCurrentPage();
@@ -2522,6 +2526,8 @@ async function saveActivePageIfDirty(options = {}) {
   }
   clearActivePageAutosaveTimer();
   const doSave = async () => {
+    const saveRevision = activePageDirtyRevision;
+    const saveKey = pageKey;
     const payloadRows = parsedRows.map((row, idx) => ({
       row_id: row.page_row_id || row.row_id || String(idx + 1).padStart(3, '0'),
       page: pageKey,
@@ -2554,8 +2560,12 @@ async function saveActivePageIfDirty(options = {}) {
       }
       return false;
     }
-    activePageDirty = false;
     activePageUpdatedAt = getPageConcurrencyToken(body.page_status) || activePageUpdatedAt;
+    if (String(activePageKey || '') === String(saveKey || '') && activePageDirtyRevision === saveRevision) {
+      activePageDirty = false;
+    } else {
+      activePageDirty = true;
+    }
     activePageReviewStatus = body.page_status && body.page_status.review_status ? String(body.page_status.review_status) : activePageReviewStatus;
     if (pageKey && body.page_status) {
       const idx = evaluatorManifest.findIndex((p) => String(p.page_key || '') === String(pageKey));
@@ -2572,6 +2582,9 @@ async function saveActivePageIfDirty(options = {}) {
       }
     }
     renderActivePageSavedMark();
+    if (activePageDirty) {
+      scheduleActivePageAutosave();
+    }
     evaluatorCanExport = Boolean(body.can_export);
     setSummaryLocked(!evaluatorCanExport);
     if (body.summary && evaluatorCanExport) {
@@ -2594,8 +2607,13 @@ async function switchToPageByIndex(nextIndex) {
   const bounded = Math.max(0, Math.min(pageList.length - 1, nextIndex));
   if (bounded === currentPageIndex && activePageKey) return;
   clearActivePageAutosaveTimer();
+  const sourcePageKey = activePageKey || currentPageKey();
   const ok = await saveActivePageIfDirty();
   if (!ok) return;
+  if (String(activePageKey || currentPageKey() || '') === String(sourcePageKey || '') && activePageDirty) {
+    const secondPassOk = await saveActivePageIfDirty();
+    if (!secondPassOk || activePageDirty) return;
+  }
   currentPageIndex = bounded;
   const key = currentPageKey();
   await loadActivePage(key);
@@ -5227,6 +5245,7 @@ function resetResults() {
   activePageReviewStatus = 'pending';
   activePageUpdatedAt = null;
   activePageDirty = false;
+  activePageDirtyRevision = 0;
   activePageSaveInFlight = false;
   activePageSavePromise = null;
   clearEvaluatorManifestTimer();

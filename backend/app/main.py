@@ -74,6 +74,9 @@ from sqlalchemy import select, delete, func
 
 DATA_DIR = os.getenv("DATA_DIR", "./data")
 PREVIEW_MAX_PIXELS = int(os.getenv("PREVIEW_MAX_PIXELS", "6000000"))
+TOOL_IMAGE_DPI = int(os.getenv("TOOL_IMAGE_DPI", "220"))
+TOOL_IMAGE_MAX_PIXELS = int(os.getenv("TOOL_IMAGE_MAX_PIXELS", "16000000"))
+FALLBACK_PREVIEW_DPI = int(os.getenv("FALLBACK_PREVIEW_DPI", "130"))
 AI_ANALYZER_ENABLED = str(os.getenv("AI_ANALYZER_ENABLED", "true")).strip().lower() not in {"0", "false", "no"}
 AI_ANALYZER_PROVIDER = str(os.getenv("AI_ANALYZER_PROVIDER", "gemini")).strip().lower() or "gemini"
 AI_ANALYZER_MODEL = str(os.getenv("AI_ANALYZER_MODEL", "gemini-2.5-flash")).strip() or "gemini-2.5-flash"
@@ -1985,30 +1988,40 @@ def _normalize_page_name(page: str) -> str:
     return value if value.startswith("page_") else f"page_{value.zfill(3)}"
 
 
-def _deskew_grayscale(gray: np.ndarray) -> np.ndarray:
+def _estimate_skew_angle(gray: np.ndarray) -> float:
     try:
         inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
         coords = np.column_stack(np.where(inv > 0))
         if coords.size == 0:
-            return gray
+            return 0.0
         angle = float(cv2.minAreaRect(coords.astype(np.float32))[-1])
         if angle < -45.0:
             angle = -(90.0 + angle)
         else:
             angle = -angle
         if abs(angle) < 0.05:
-            return gray
-        h, w = gray.shape[:2]
-        matrix = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
-        return cv2.warpAffine(
-            gray,
-            matrix,
-            (w, h),
-            flags=cv2.INTER_CUBIC,
-            borderMode=cv2.BORDER_REPLICATE,
-        )
+            return 0.0
+        return angle
     except Exception:
-        return gray
+        return 0.0
+
+
+def _deskew_image(img: np.ndarray) -> np.ndarray:
+    if img is None or img.size == 0:
+        return img
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+    angle = _estimate_skew_angle(gray)
+    if abs(angle) < 0.05:
+        return img
+    h, w = gray.shape[:2]
+    matrix = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
+    return cv2.warpAffine(
+        img,
+        matrix,
+        (w, h),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
 
 
 def _remove_grid_lines(gray: np.ndarray) -> np.ndarray:
@@ -2031,14 +2044,16 @@ def _apply_image_tool(img_bgr: np.ndarray, tool: str) -> np.ndarray:
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
     if tool == "deskew":
-        return _deskew_grayscale(gray)
+        return _deskew_image(img_bgr)
 
     if tool == "contrast":
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        return clahe.apply(gray)
+        lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
+        return cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
 
     if tool == "binarize":
-        return cv2.adaptiveThreshold(
+        bw = cv2.adaptiveThreshold(
             gray,
             255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -2046,16 +2061,18 @@ def _apply_image_tool(img_bgr: np.ndarray, tool: str) -> np.ndarray:
             31,
             11,
         )
+        return cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR)
 
     if tool == "denoise":
-        return cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
+        return cv2.fastNlMeansDenoisingColored(img_bgr, None, 8, 8, 7, 21)
 
     if tool == "sharpen":
         kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
-        return cv2.filter2D(gray, -1, kernel)
+        return cv2.filter2D(img_bgr, -1, kernel)
 
     if tool == "remove_lines":
-        return _remove_grid_lines(gray)
+        no_lines = _remove_grid_lines(gray)
+        return cv2.cvtColor(no_lines, cv2.COLOR_GRAY2BGR)
 
     raise HTTPException(status_code=400, detail="unsupported_image_tool")
 
@@ -2123,7 +2140,8 @@ def apply_image_tool(
     job_dir = os.path.join(DATA_DIR, "jobs", job_id_str)
     cleaned_dir = os.path.join(job_dir, "cleaned")
     cleaned_path = os.path.join(cleaned_dir, f"{page_name}.png")
-    source_path = _resolve_job_page_image_path(job_id_str, page_name, prefer_cleaned=False)
+    tool_source_path = _ensure_tool_source_image(job_id_str, page_name)
+    source_path = tool_source_path or _resolve_job_page_image_path(job_id_str, page_name, prefer_cleaned=False)
 
     if not source_path and not os.path.exists(cleaned_path):
         raise HTTPException(status_code=404, detail="page_image_not_found")
@@ -2133,13 +2151,17 @@ def apply_image_tool(
     if tool == "reset":
         if not source_path:
             raise HTTPException(status_code=404, detail="original_page_not_found")
-        reset_img = clean_page(source_path)
+        reset_img = cv2.imread(source_path)
+        if reset_img is None:
+            raise HTTPException(status_code=400, detail="unable_to_read_source_image")
         cv2.imwrite(cleaned_path, reset_img)
     else:
         if not os.path.exists(cleaned_path):
             if not source_path:
                 raise HTTPException(status_code=404, detail="page_image_not_found")
-            seeded = clean_page(source_path)
+            seeded = cv2.imread(source_path)
+            if seeded is None:
+                raise HTTPException(status_code=400, detail="unable_to_read_source_image")
             cv2.imwrite(cleaned_path, seeded)
 
         img = cv2.imread(cleaned_path)
@@ -2173,10 +2195,61 @@ def _resolve_job_page_image_path(job_id: str, page: str, prefer_cleaned: bool = 
     if os.path.exists(preview_path):
         return preview_path
 
-    if _generate_preview_page_if_missing(job_id, filename, preview_path):
+    if _generate_preview_page_if_missing(
+        job_id,
+        filename,
+        preview_path,
+        dpi=FALLBACK_PREVIEW_DPI,
+        max_pixels=PREVIEW_MAX_PIXELS,
+    ):
         return preview_path
 
     return None
+
+
+def _ensure_tool_source_image(job_id: str, page_name: str) -> Optional[str]:
+    job_dir = os.path.join(DATA_DIR, "jobs", job_id)
+    input_pdf = os.path.join(job_dir, "input", "document.pdf")
+    if not os.path.exists(input_pdf):
+        return None
+
+    page_token = str(page_name).replace("page_", "")
+    if not page_token.isdigit():
+        return None
+    page_num = int(page_token)
+    if page_num <= 0:
+        return None
+
+    source_dir = os.path.join(job_dir, "tool_pages")
+    os.makedirs(source_dir, exist_ok=True)
+    source_path = os.path.join(source_dir, f"{page_name}.png")
+    if os.path.exists(source_path):
+        return source_path
+
+    try:
+        pages = convert_from_path(
+            input_pdf,
+            dpi=TOOL_IMAGE_DPI,
+            fmt="png",
+            first_page=page_num,
+            last_page=page_num,
+        )
+        if not pages:
+            return None
+        page_img = pages[0]
+        w, h = page_img.size
+        pixels = max(1, w * h)
+        if pixels > TOOL_IMAGE_MAX_PIXELS:
+            scale = math.sqrt(TOOL_IMAGE_MAX_PIXELS / float(pixels))
+            page_img = page_img.resize(
+                (max(1, int(w * scale)), max(1, int(h * scale))),
+                resample=Image.Resampling.BILINEAR,
+            )
+        page_img.save(source_path, format="PNG")
+        return source_path if os.path.exists(source_path) else None
+    except Exception as exc:
+        logger.warning("Failed to render tool source image for job=%s page=%s", job_id, page_name, exc_info=exc)
+        return None
 
 
 def _ocr_section_text_tesseract(section_bgr: np.ndarray, x_offset: int = 0, y_offset: int = 0) -> Dict:
@@ -2963,7 +3036,13 @@ def _ocr_items_to_words(ocr_items: List[Dict]) -> List[Dict]:
     return words
 
 
-def _generate_preview_page_if_missing(job_id: str, filename: str, output_path: str) -> bool:
+def _generate_preview_page_if_missing(
+    job_id: str,
+    filename: str,
+    output_path: str,
+    dpi: int = FALLBACK_PREVIEW_DPI,
+    max_pixels: int = PREVIEW_MAX_PIXELS,
+) -> bool:
     if not filename.endswith(".png"):
         return False
     if not filename.startswith("page_"):
@@ -2987,7 +3066,7 @@ def _generate_preview_page_if_missing(job_id: str, filename: str, output_path: s
     try:
         pages = convert_from_path(
             input_pdf,
-            dpi=110,
+            dpi=max(72, int(dpi)),
             fmt="png",
             first_page=page_num,
             last_page=page_num,
@@ -2997,8 +3076,9 @@ def _generate_preview_page_if_missing(job_id: str, filename: str, output_path: s
         page = pages[0]
         w, h = page.size
         pixels = max(1, w * h)
-        if pixels > PREVIEW_MAX_PIXELS:
-            scale = math.sqrt(PREVIEW_MAX_PIXELS / float(pixels))
+        pixel_cap = max(1, int(max_pixels))
+        if pixels > pixel_cap:
+            scale = math.sqrt(pixel_cap / float(pixels))
             page = page.resize(
                 (max(1, int(w * scale)), max(1, int(h * scale))),
                 resample=Image.Resampling.BILINEAR,
