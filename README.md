@@ -232,13 +232,14 @@ Preview/processing controls:
 
 AI analyzer controls:
 - `AI_ANALYZER_ENABLED`
-- `AI_ANALYZER_PROVIDER` (`gemini`)
+- `AI_ANALYZER_PROVIDER` (`openai` or `gemini`)
 - `AI_ANALYZER_MODEL`
 - `AI_ANALYZER_TIMEOUT_SEC`
 - `AI_ANALYZER_SAMPLE_PAGES`
 - `AI_ANALYZER_MIN_ROWS`
 - `AI_ANALYZER_MIN_DATE_RATIO`
 - `AI_ANALYZER_MIN_BAL_RATIO`
+- `OPENAI_API_KEY`
 - `GEMINI_API_KEY`
 
 Bank profile config path:
@@ -260,5 +261,5 @@ Runtime artifacts are stored in `DATA_DIR`:
 ## Troubleshooting
 - If UI doesn’t reflect backend edits, restart API/worker and hard-refresh browser.
 - If OCR appears stuck, check `/jobs/{job_id}` and worker logs.
-- If analyzer remains idle, validate `AI_ANALYZER_ENABLED` and `GEMINI_API_KEY`.
+- If analyzer remains idle, validate `AI_ANALYZER_ENABLED` and provider API key (`OPENAI_API_KEY` or `GEMINI_API_KEY`).
 - Never commit `.env`; rotate keys if exposed.

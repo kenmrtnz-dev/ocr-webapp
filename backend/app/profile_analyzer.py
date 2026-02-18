@@ -21,7 +21,7 @@ from app.statement_parser import is_transaction_row, parse_words_page
 
 
 def analyze_account_identity_from_text(page_text: str) -> Dict:
-    provider = str(os.getenv("AI_ANALYZER_PROVIDER", "gemini")).strip().lower() or "gemini"
+    provider = str(os.getenv("AI_ANALYZER_PROVIDER", "openai")).strip().lower() or "openai"
     model = str(os.getenv("AI_ANALYZER_MODEL", "")).strip() or _default_model(provider)
 
     response = {
@@ -39,7 +39,7 @@ def analyze_account_identity_from_text(page_text: str) -> Dict:
 
     heuristic_name, heuristic_number = _extract_identity_heuristic(text)
 
-    if provider != "gemini":
+    if provider not in {"gemini", "openai"}:
         response["reason"] = "unsupported_provider"
         response["result"] = "fallback_heuristic"
         response["account_name"] = heuristic_name
@@ -58,14 +58,17 @@ def analyze_account_identity_from_text(page_text: str) -> Dict:
         "Output JSON now."
     )
 
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0,
-            "responseMimeType": "application/json",
-        },
-    }
-    parsed, reason = _call_gemini_json(payload, model)
+    if provider == "openai":
+        parsed, reason = _call_openai_json_prompt(prompt, model)
+    else:
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0,
+                "responseMimeType": "application/json",
+            },
+        }
+        parsed, reason = _call_gemini_json(payload, model)
     if not parsed:
         response["reason"] = reason or "invalid_llm_output"
         response["result"] = "fallback_heuristic"
@@ -249,7 +252,7 @@ def analyze_unknown_bank_and_apply(
     min_date_ratio: float,
     min_balance_ratio: float,
 ) -> Dict:
-    provider = str(os.getenv("AI_ANALYZER_PROVIDER", "gemini")).strip().lower() or "gemini"
+    provider = str(os.getenv("AI_ANALYZER_PROVIDER", "openai")).strip().lower() or "openai"
     model = str(os.getenv("AI_ANALYZER_MODEL", "")).strip() or _default_model(provider)
     response = {
         "triggered": True,
@@ -309,7 +312,7 @@ def analyze_unknown_bank_and_apply_guided(
     min_date_ratio: float,
     min_balance_ratio: float,
 ) -> Dict:
-    provider = str(os.getenv("AI_ANALYZER_PROVIDER", "gemini")).strip().lower() or "gemini"
+    provider = str(os.getenv("AI_ANALYZER_PROVIDER", "openai")).strip().lower() or "openai"
     model = str(os.getenv("AI_ANALYZER_MODEL", "")).strip() or _default_model(provider)
     response = {
         "triggered": True,
@@ -395,9 +398,11 @@ def _build_snippets(layout_pages: List[Dict], sample_pages: int) -> List[Dict]:
 
 
 def _default_model(provider: str) -> str:
+    if provider == "openai":
+        return "gpt-4o-mini"
     if provider == "gemini":
         return "gemini-2.5-flash"
-    return "gemini-2.5-flash"
+    return "gpt-4o-mini"
 
 
 def _generate_profile_with_llm(
@@ -405,6 +410,8 @@ def _generate_profile_with_llm(
     provider: str,
     model: str,
 ) -> Tuple[Optional[Dict], Optional[str]]:
+    if provider == "openai":
+        return _generate_profile_with_openai(snippets, model)
     if provider == "gemini":
         return _generate_profile_with_gemini(snippets, model)
     return None, "unsupported_provider"
@@ -416,9 +423,68 @@ def _generate_profile_with_llm_guided(
     provider: str,
     model: str,
 ) -> Tuple[Optional[Dict], Optional[str]]:
+    if provider == "openai":
+        return _generate_profile_with_openai_guided(snippets, guided_rows, model)
     if provider == "gemini":
         return _generate_profile_with_gemini_guided(snippets, guided_rows, model)
     return None, "unsupported_provider"
+
+
+def _generate_profile_with_openai(
+    snippets: List[Dict],
+    model: str,
+) -> Tuple[Optional[Dict], Optional[str]]:
+    prompt = (
+        "Generate a strict bank statement parsing profile from snippet text.\n"
+        "Return one JSON object only, no markdown, no explanations.\n"
+        "Required keys:\n"
+        "profile_name, detection_contains_any, detection_contains_all, date_tokens, description_tokens, "
+        "debit_tokens, credit_tokens, balance_tokens, date_order, noise_tokens, "
+        "account_name_patterns, account_number_patterns.\n"
+        "Rules:\n"
+        "- date_order values must be from [mdy, dmy, ymd].\n"
+        "- all array values must be strings.\n"
+        "- detection_contains_any and detection_contains_all cannot both be empty.\n"
+        "- profile_name should be short and bank-specific.\n"
+        "Example shape:\n"
+        "{\"profile_name\":\"AUTO_EXAMPLE\",\"detection_contains_any\":[\"example bank\"],\"detection_contains_all\":[],"
+        "\"date_tokens\":[\"date\"],\"description_tokens\":[\"description\"],\"debit_tokens\":[\"debit\"],"
+        "\"credit_tokens\":[\"credit\"],\"balance_tokens\":[\"balance\"],\"date_order\":[\"mdy\"],"
+        "\"noise_tokens\":[],\"account_name_patterns\":[],\"account_number_patterns\":[]}\n"
+        f"Statement snippets: {json.dumps(snippets, ensure_ascii=True)}\n"
+        "Output JSON now."
+    )
+    return _call_openai_json_prompt(prompt, model)
+
+
+def _generate_profile_with_openai_guided(
+    snippets: List[Dict],
+    guided_rows: List[Dict],
+    model: str,
+) -> Tuple[Optional[Dict], Optional[str]]:
+    prompt = (
+        "Generate a strict bank statement parsing profile using guided table OCR samples.\n"
+        "Return one JSON object only, no markdown.\n"
+        "Required keys:\n"
+        "profile_name, detection_contains_any, detection_contains_all, date_tokens, description_tokens, "
+        "debit_tokens, credit_tokens, balance_tokens, date_order, noise_tokens, "
+        "account_name_patterns, account_number_patterns.\n"
+        "Rules:\n"
+        "- date_order values must be from [mdy, dmy, ymd].\n"
+        "- all arrays contain strings only.\n"
+        "- detection_contains_any and detection_contains_all cannot both be empty.\n"
+        "- infer headers/tokens from guided OCR rows and snippets.\n"
+        "- do not invent bank/account names as profile names; profile_name must represent a bank layout.\n"
+        "Example shape:\n"
+        "{\"profile_name\":\"AUTO_EXAMPLE_BANK\",\"detection_contains_any\":[\"example bank\"],"
+        "\"detection_contains_all\":[],\"date_tokens\":[\"date\"],\"description_tokens\":[\"description\"],"
+        "\"debit_tokens\":[\"debit\"],\"credit_tokens\":[\"credit\"],\"balance_tokens\":[\"balance\"],"
+        "\"date_order\":[\"mdy\"],\"noise_tokens\":[],\"account_name_patterns\":[],\"account_number_patterns\":[]}\n"
+        f"Guided rows: {json.dumps(guided_rows, ensure_ascii=True)}\n"
+        f"Statement snippets: {json.dumps(snippets, ensure_ascii=True)}\n"
+        "Output JSON now."
+    )
+    return _call_openai_json_prompt(prompt, model)
 
 
 def _generate_profile_with_gemini(
@@ -586,6 +652,93 @@ def _call_gemini_json(payload: Dict, model: str) -> Tuple[Optional[Dict], Option
     except Exception:
         match = re.search(r"\{.*\}", content, flags=re.DOTALL)
         if not match:
+            return None, "invalid_llm_output"
+
+
+def _call_openai_json_prompt(prompt: str, model: str) -> Tuple[Optional[Dict], Optional[str]]:
+    api_key = str(os.getenv("OPENAI_API_KEY", "")).strip()
+    if not api_key:
+        return None, "missing_api_key"
+
+    timeout = int(os.getenv("AI_ANALYZER_TIMEOUT_SEC", "20"))
+    max_retries = max(0, int(os.getenv("AI_ANALYZER_RETRIES", "2")))
+    backoff_sec = max(0.1, float(os.getenv("AI_ANALYZER_RETRY_BACKOFF_SEC", "1.2")))
+
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You return only a strict JSON object with no markdown and no extra text.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+    }
+
+    raw = ""
+    last_reason = None
+    for attempt in range(max_retries + 1):
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as res:
+                raw = res.read().decode("utf-8", errors="ignore")
+            last_reason = None
+            break
+        except urllib.error.HTTPError as exc:
+            last_reason = f"http_error_{exc.code}"
+            if exc.code in {429, 500, 502, 503, 504} and attempt < max_retries:
+                time.sleep(backoff_sec * (2 ** attempt))
+                continue
+            return None, last_reason
+        except TimeoutError:
+            last_reason = "timeout"
+            if attempt < max_retries:
+                time.sleep(backoff_sec * (2 ** attempt))
+                continue
+            return None, last_reason
+        except (urllib.error.URLError, ValueError):
+            last_reason = "http_error_network"
+            if attempt < max_retries:
+                time.sleep(backoff_sec * (2 ** attempt))
+                continue
+            return None, last_reason
+    if last_reason and not raw:
+        return None, last_reason
+
+    try:
+        parsed = json.loads(raw)
+        content = (
+            (((parsed.get("choices") or [{}])[0]).get("message") or {}).get("content")
+            if isinstance(parsed, dict)
+            else None
+        )
+    except Exception:
+        return None, "invalid_llm_output"
+
+    text = str(content or "").strip()
+    if not text:
+        return None, "invalid_llm_output"
+
+    try:
+        return json.loads(text), None
+    except Exception:
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not match:
+            return None, "invalid_llm_output"
+        try:
+            return json.loads(match.group(0)), None
+        except Exception:
             return None, "invalid_llm_output"
         try:
             return json.loads(match.group(0)), None
